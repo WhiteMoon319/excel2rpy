@@ -214,12 +214,20 @@ def parse_rpy(filepath: str) -> list:
                 })
                 continue
 
-            # jump inside menu
-            if in_menu and content.startswith("jump "):
-                target = content[5:].strip()
-                # 赋值给上一个 menu_option
-                if result and result[-1]["_type"] == "menu_option":
-                    result[-1]["跳转目标"] = target
+            # menu action: jump / return / call / $ 等
+            if in_menu and result and result[-1]["_type"] == "menu_option":
+                if content.startswith("jump "):
+                    result[-1]["跳转目标"] = "jump " + content[5:].strip()
+                    continue
+                elif content == "return":
+                    result[-1]["跳转目标"] = "return"
+                    continue
+                elif content.startswith("call "):
+                    result[-1]["跳转目标"] = "call " + content[5:].strip()
+                    continue
+                elif content.startswith("$ "):
+                    result[-1]["跳转目标"] = "$ " + content[2:].strip()
+                    continue
                 continue
 
             # if / elif / else
