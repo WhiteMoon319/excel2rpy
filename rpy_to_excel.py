@@ -18,11 +18,43 @@ except ImportError:
     print("请先安装 openpyxl：pip install openpyxl")
     sys.exit(1)
 
+# ── 英→中 反向映射 ──────────────────────────────────────
+
+TRANSITION_REVERSE = {
+    "dissolve": "溶解", "fade": "褪色", "pixellate": "像素化",
+    "hpunch": "横向振动", "vpunch": "纵向振动", "blinds": "百叶窗",
+    "squares": "网格覆盖", "wipeleft": "擦除", "slideleft": "滑入",
+    "slideawayleft": "滑出", "pushright": "推出",
+}
+
+POSITION_REVERSE = {
+    "left": "左边", "right": "右边", "center": "中间",
+    "truecenter": "真中", "offscreenleft": "左外", "offscreenright": "右外",
+}
+
+
+def _reverse_translate(s: str) -> str:
+    """将英文转场/位置翻译为中文"""
+    if not s:
+        return ""
+    parts = s.split()
+    result = []
+    for p in parts:
+        if p in POSITION_REVERSE:
+            result.append(POSITION_REVERSE[p])
+        elif p in TRANSITION_REVERSE:
+            result.append(TRANSITION_REVERSE[p])
+        else:
+            result.append(p)
+    return " ".join(result)
+
+
 HEADERS = [
     ("场景标签", 16),
-    ("指令类型", 18),
+    ("指令类型", 20),
     ("图片/背景", 24),
     ("角色名", 14),
+    ("变量名", 14),      # 新增
     ("对话文本", 40),
     ("选项文本", 20),
     ("跳转目标", 16),
@@ -43,10 +75,6 @@ COMMAND_TYPES = [
     "jump（跳转）",
     "call（调用子场景）",
     "return（返回）",
-    "$（设置变量）",
-    "if（条件判断）",
-    "elif（否则如果）",
-    "else（否则）",
     "play_music（播放BGM）",
     "stop_music（停止BGM）",
     "queue_music（排队播BGM）",
@@ -57,8 +85,133 @@ COMMAND_TYPES = [
     "player_input（玩家输入）",
     "window（对话框开关）",
     "define_character（定义角色）",
+    "define_variable（定义变量）",
+    "define_image（定义图片）",
+    "variable_set（变量赋值）",
+    "variable_change（变量增减）",
+    "variable_toggle（变量开关）",
+    "variable_eq（变量=）",
+    "variable_ne（变量≠）",
+    "variable_gt（变量>）",
+    "variable_ge（变量≥）",
+    "variable_lt（变量<）",
+    "variable_le（变量≤）",
+    "$（设置变量）",
+    "if（条件判断）",
+    "elif（否则如果）",
+    "else（否则）",
+    "default（默认变量）",
     "image（定义图片）",
 ]
+
+
+# ── 结构化变量指令反向匹配 ──────────────────────────────
+
+# 结构化条件运算符 → 指令类型
+STRUCTURED_COND_MAP = {
+    "==": "variable_eq",
+    "!=": "variable_ne",
+    ">=": "variable_ge",
+    "<=": "variable_le",
+    ">": "variable_gt",
+    "<": "variable_lt",
+}
+
+# 结构化条件指令 → 中文下拉标签
+STRUCTURED_COND_LABEL = {
+    "variable_eq": "variable_eq（变量=）",
+    "variable_ne": "variable_ne（变量≠）",
+    "variable_gt": "variable_gt（变量>）",
+    "variable_ge": "variable_ge（变量≥）",
+    "variable_lt": "variable_lt（变量<）",
+    "variable_le": "variable_le（变量≤）",
+}
+
+
+def _try_match_structured_condition(content: str) -> dict | None:
+    """
+    尝试匹配结构化条件：if <var> <op> <val>:
+    返回匹配结果 dict 或 None
+    """
+    m = re.match(r'(if|elif)\s+(\w+)\s*(==|!=|>=|<=|>|<)\s*(\S+?)\s*:\s*$', content)
+    if not m:
+        return None
+    keyword = m.group(1)
+    var_name = m.group(2)
+    op = m.group(3)
+    val = m.group(4)
+    if not re.match(r'^-?\d+(\.\d+)?$', val):
+        return None
+    cmd = STRUCTURED_COND_MAP.get(op)
+    if not cmd:
+        return None
+    label = STRUCTURED_COND_LABEL.get(cmd, f"{cmd}（变量{op}）")
+    return {
+        "_type": "if" if keyword == "if" else "elif",
+        "指令类型": label,
+        "变量名": var_name,
+        "对话文本": val,
+    }
+
+
+def _try_match_structured_dollar(content: str) -> dict | None:
+    """
+    尝试匹配结构化 $ 语句：
+    - $ var += val  → variable_change
+    - $ var -= val  → variable_change
+    - $ var = True/False → variable_toggle
+    - $ var = val (simple) → variable_set
+    返回匹配结果 dict 或 None（复杂表达式回退到 $）
+    """
+    # variable_change: += 或 -=
+    m = re.match(r'\$\s+(\w+)\s*(\+|-)=\s*(.+)$', content)
+    if m:
+        var_name = m.group(1)
+        op = m.group(2)
+        val = m.group(3).strip()
+        return {
+            "_type": "$",
+            "指令类型": "variable_change（变量增减）",
+            "变量名": var_name,
+            "对话文本": f"{op}{val}",
+        }
+
+    # variable_toggle: = True 或 = False
+    m = re.match(r'\$\s+(\w+)\s*=\s*(True|False)\s*$', content)
+    if m:
+        var_name = m.group(1)
+        val = "true" if m.group(2) == "True" else "false"
+        return {
+            "_type": "$",
+            "指令类型": "variable_toggle（变量开关）",
+            "变量名": var_name,
+            "对话文本": val,
+        }
+
+    # variable_set: = value (简单非函数赋值)
+    m = re.match(r'\$\s+(\w+)\s*=\s*(.+)$', content)
+    if m:
+        var_name = m.group(1)
+        val = m.group(2).strip()
+        # 只接受简单字面量：数字、标识符、True/False/None、引号字符串
+        is_simple = (
+            re.match(r'^-?\d+(\.\d+)?$', val)
+            or val in ("True", "False", "None")
+            or re.match(r'^[A-Za-z_]\w*$', val)
+            or (val.startswith('"') and val.endswith('"'))
+            or (val.startswith("'") and val.endswith("'"))
+        )
+        if not is_simple:
+            return None
+        return {
+            "_type": "$",
+            "指令类型": "variable_set（变量赋值）",
+            "变量名": var_name,
+            "对话文本": val,
+        }
+
+    return None
+
 
 HEADER_FILL = PatternFill(start_color="2F5496", end_color="2F5496", fill_type="solid")
 HEADER_FONT = Font(name="微软雅黑", bold=True, color="FFFFFF", size=10)
@@ -80,7 +233,6 @@ def parse_rpy(filepath: str) -> list:
         raw_lines = f.readlines()
 
     result = []
-    # 先跳过空白行处理，保留有意义的行
     lines = []
     for line in raw_lines:
         stripped = line.rstrip("\n\r")
@@ -94,13 +246,13 @@ def parse_rpy(filepath: str) -> list:
     in_menu = False
     in_python = False
     python_indent = 0
-    in_if_body = False  # 是否在 if/elif/else 条件体中
+    in_if_body = False
     if_base_indent = -1
 
     for i, (raw, indent, content) in enumerate(lines):
         if content == "":
             if in_if_body:
-                result.append({"_type": "blank"})  # 仅条件体结束需保留空行
+                result.append({"_type": "blank"})
             in_menu = False
             in_if_body = False
             continue
@@ -108,12 +260,10 @@ def parse_rpy(filepath: str) -> list:
         if content.startswith("#"):
             continue
 
-        # 条件体结束检测：缩进回到 if 层级或更低
         if in_if_body and indent <= if_base_indent:
             result.append({"_type": "blank"})
             in_if_body = False
 
-        # 跳过注释
         if content.startswith("#"):
             continue
 
@@ -121,11 +271,13 @@ def parse_rpy(filepath: str) -> list:
         if in_python:
             if indent <= python_indent and not content.startswith(" "):
                 in_python = False
-                result.append({"_type": "blank"})  # 结束条件体
-                # 不 continue，让当前行走正常解析
+                result.append({"_type": "blank"})
             else:
-                # 识别 python 块内的 if/elif/else，用对应的指令类型
-                if content == "else:":
+                # 识别 python 块内的 if/elif/else
+                struct = _try_match_structured_condition(content)
+                if struct:
+                    result.append(struct)
+                elif content == "else:":
                     result.append({"_type": "else", "指令类型": "else（否则）"})
                 elif re.match(r"elif\s+", content) and content.rstrip().endswith(":"):
                     result.append({"_type": "elif", "指令类型": "elif（否则如果）",
@@ -134,8 +286,13 @@ def parse_rpy(filepath: str) -> list:
                     result.append({"_type": "if", "指令类型": "if（条件判断）",
                                    "对话文本": content[3:].rstrip(":").strip()})
                 else:
-                    result.append({"_type": "$", "指令类型": "$（设置变量）",
-                                   "对话文本": content})
+                    # 尝试结构化 $
+                    struct_dollar = _try_match_structured_dollar(content)
+                    if struct_dollar:
+                        result.append(struct_dollar)
+                    else:
+                        result.append({"_type": "$", "指令类型": "$（设置变量）",
+                                       "对话文本": content})
                 continue
 
         # Top-level define / default / image
@@ -155,11 +312,10 @@ def parse_rpy(filepath: str) -> list:
                 m = re.match(r"default\s+(\w+)\s*=\s*(.+)", content)
                 if m:
                     val = m.group(2).strip()
-                    # Keep outer quotes for default values (e.g., default x = "")
                     result.append({
-                        "_type": "default",
-                        "指令类型": "default（默认变量）",
-                        "角色名": m.group(1),
+                        "_type": "define_variable",
+                        "指令类型": "define_variable（定义变量）",
+                        "变量名": m.group(1),
                         "对话文本": val,
                     })
                 continue
@@ -167,16 +323,15 @@ def parse_rpy(filepath: str) -> list:
             if content.startswith("image "):
                 m = re.match(r"image\s+(.+?)\s*=\s*(.+)", content)
                 if m:
-                    img_name = m.group(1)
+                    img_name = m.group(1).strip()
                     img_val = m.group(2).strip()
-                    # Strip outer quotes if present (simple string paths)
                     if (img_val.startswith('"') and img_val.endswith('"')) or \
                        (img_val.startswith("'") and img_val.endswith("'")):
                         img_val = img_val[1:-1]
                     result.append({
-                        "_type": "image",
-                        "指令类型": "image（定义图片）",
-                        "角色名": img_name,
+                        "_type": "define_image",
+                        "指令类型": "define_image（定义图片）",
+                        "变量名": img_name,
                         "图片/背景": img_val,
                     })
                 continue
@@ -203,18 +358,17 @@ def parse_rpy(filepath: str) -> list:
                 in_menu = True
                 continue
 
-            # menu option: "text":
+            # menu option
             if in_menu and re.match(r'"([^"]*)"\s*:', content):
                 m = re.match(r'"([^"]*)"\s*:', content)
                 result.append({
                     "_type": "menu_option",
                     "指令类型": "menu_option（菜单选项）",
                     "选项文本": m.group(1),
-                    "跳转目标": "",  # filled by next line
+                    "跳转目标": "",
                 })
                 continue
 
-            # menu action: jump / return / call / $ 等
             if in_menu and result and result[-1]["_type"] == "menu_option":
                 if content.startswith("jump "):
                     result[-1]["跳转目标"] = "jump " + content[5:].strip()
@@ -230,7 +384,21 @@ def parse_rpy(filepath: str) -> list:
                     continue
                 continue
 
-            # if / elif / else
+            # 结构化条件（缩进中的 if/elif）
+            struct_cond = _try_match_structured_condition(content)
+            if struct_cond:
+                result.append(struct_cond)
+                in_if_body = True
+                if_base_indent = indent
+                continue
+
+            # 结构化 $ 语句
+            struct_dollar = _try_match_structured_dollar(content)
+            if struct_dollar:
+                result.append(struct_dollar)
+                continue
+
+            # if / elif / else (传统)
             if re.match(r"if\s+", content) and content.rstrip().endswith(":"):
                 cond = content[3:].rstrip(":").strip()
                 result.append({
@@ -273,7 +441,6 @@ def parse_rpy(filepath: str) -> list:
                 rest = content[6:].strip()
                 img = ""
                 effect = ""
-                # scene <img> with <effect>
                 m = re.match(r"(.+?)\s+with\s+(.+)", rest)
                 if m:
                     img = m.group(1).strip()
@@ -284,7 +451,7 @@ def parse_rpy(filepath: str) -> list:
                     "_type": "scene",
                     "指令类型": "scene（背景图）",
                     "图片/背景": img,
-                    "位置/特效/属性": effect,
+                    "位置/特效/属性": _reverse_translate(effect),
                 })
                 continue
 
@@ -292,10 +459,8 @@ def parse_rpy(filepath: str) -> list:
             if content.startswith("show "):
                 rest = content[5:].strip()
                 img = ""
-                alias = ""
                 effect = ""
 
-                # show <img> as <alias> at <pos> with <effect>
                 parts = rest.split()
                 i = 0
                 img_parts = []
@@ -311,7 +476,7 @@ def parse_rpy(filepath: str) -> list:
                     "_type": "show",
                     "指令类型": "show（显示角色）",
                     "图片/背景": img,
-                    "位置/特效/属性": effect,
+                    "位置/特效/属性": _reverse_translate(effect),
                 })
                 continue
 
@@ -327,7 +492,7 @@ def parse_rpy(filepath: str) -> list:
                     "_type": "hide",
                     "指令类型": "hide（隐藏角色）",
                     "角色名": rest,
-                    "位置/特效/属性": effect,
+                    "位置/特效/属性": _reverse_translate(effect),
                 })
                 continue
 
@@ -338,7 +503,7 @@ def parse_rpy(filepath: str) -> list:
                 result.append({
                     "_type": "stop_music",
                     "指令类型": "stop_music（停止BGM）",
-                    "位置/特效/属性": effect,
+                    "位置/特效/属性": _reverse_translate(effect),
                 })
                 continue
 
@@ -442,7 +607,7 @@ def parse_rpy(filepath: str) -> list:
                 })
                 continue
 
-            # $ (python one-liner)
+            # $ (python one-liner) — fallback for remaining
             if content.startswith("$ "):
                 code = content[2:].strip()
                 result.append({
@@ -452,7 +617,7 @@ def parse_rpy(filepath: str) -> list:
                 })
                 continue
 
-            # centered (特殊旁白)
+            # centered
             if content.startswith("centered "):
                 m = re.match(r'centered\s+"([^"]*)"', content)
                 text = m.group(1) if m else content[9:].strip().strip('"')
@@ -496,7 +661,7 @@ def parse_rpy(filepath: str) -> list:
                     })
                 continue
 
-            # bare string "text" (narrator) — 可能同一行有多个字符串
+            # bare string "text" (narrator)
             m_bare = re.match(r'"([^"]*)"', content)
             if m_bare:
                 result.append({
@@ -504,7 +669,6 @@ def parse_rpy(filepath: str) -> list:
                     "指令类型": "narrator（旁白）",
                     "对话文本": m_bare.group(1),
                 })
-                # 检查同一行是否还有第二个字符串
                 rest = content[m_bare.end():].strip()
                 m2 = re.match(r'"([^"]*)"', rest)
                 if m2:
@@ -518,37 +682,22 @@ def parse_rpy(filepath: str) -> list:
     return result
 
 
-def write_excel(rows: list, output_path: str):
-    """将解析结果写入 Excel"""
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "script"
+def _write_sheet(wb, sheet_name: str, items: list):
+    """将 items 写入一个 Sheet（11 列）"""
+    if sheet_name in [s.title for s in wb.worksheets]:
+        ws = wb[sheet_name]
+    elif wb.worksheets and wb.worksheets[0].title == "Sheet":
+        ws = wb.active
+        ws.title = sheet_name
+    else:
+        ws = wb.create_sheet(sheet_name)
 
-    # 写表头
-    for col_idx, (header, width) in enumerate(HEADERS, start=1):
-        cell = ws.cell(row=1, column=col_idx, value=header)
-        cell.font = HEADER_FONT
-        cell.fill = HEADER_FILL
-        cell.alignment = HEADER_ALIGN
-        cell.border = THIN_BORDER
-        ws.column_dimensions[get_column_letter(col_idx)].width = width
+    _setup_sheet_header(ws)
 
-    ws.row_dimensions[1].height = 24
-
-    # 指令类型下拉
-    cmd_formula = '"' + ",".join(COMMAND_TYPES) + '"'
-    dv = DataValidation(type="list", formula1=cmd_formula, allow_blank=True)
-    dv.error = "请从下拉列表选择指令类型"
-    dv.errorTitle = "无效指令"
-    dv.add("B2:B10000")
-    ws.add_data_validation(dv)
-
-    # 写数据行
     row_num = 1
-    for item in rows:
+    for item in items:
         row_num += 1
         if item.get("_type") == "blank":
-            # 写空行 — excel_to_rpy 用空行来结束 if/menu 块
             for col_idx in range(1, len(HEADERS) + 1):
                 cell = ws.cell(row=row_num, column=col_idx, value="")
                 cell.border = THIN_BORDER
@@ -560,6 +709,7 @@ def write_excel(rows: list, output_path: str):
             item.get("指令类型", ""),
             item.get("图片/背景", ""),
             item.get("角色名", ""),
+            item.get("变量名", ""),       # 新增列
             item.get("对话文本", ""),
             item.get("选项文本", ""),
             item.get("跳转目标", ""),
@@ -578,9 +728,80 @@ def write_excel(rows: list, output_path: str):
         ws.row_dimensions[row_num].height = 20
 
     ws.freeze_panes = "A2"
+
+
+def _setup_sheet_header(ws):
+    """设置 Sheet 表头（仅当表头不存在时），并添加下拉验证"""
+    if ws.cell(1, 1).value:
+        return
+    for col_idx, (header, width) in enumerate(HEADERS, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=header)
+        cell.font = HEADER_FONT
+        cell.fill = HEADER_FILL
+        cell.alignment = HEADER_ALIGN
+        cell.border = THIN_BORDER
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+    ws.row_dimensions[1].height = 24
+
+    # 指令类型下拉
+    cmd_formula = '"' + ",".join(COMMAND_TYPES) + '"'
+    dv = DataValidation(type="list", formula1=cmd_formula, allow_blank=True)
+    dv.error = "请从下拉列表选择指令类型"
+    dv.errorTitle = "无效指令"
+    dv.add("B2:B10000")
+    ws.add_data_validation(dv)
+
+    # 变量开关下拉（F 列）
+    dv_toggle = DataValidation(type="list", formula1='"true,false"', allow_blank=True)
+    dv_toggle.add("F2:F10000")
+    ws.add_data_validation(dv_toggle)
+
+
+def write_excel(rows: list, output_path: str, split_sheets: bool = True):
+    """将解析结果写入 Excel，默认按 label 拆分为多 Sheet"""
+    wb = Workbook()
+
+    if not split_sheets:
+        _write_sheet(wb, "script", rows)
+    else:
+        top_items = []
+        label_groups = []
+        current_label = None
+        current_items = []
+
+        for item in rows:
+            if item.get("_type") == "label":
+                if current_label is not None:
+                    label_groups.append((current_label, current_items))
+                elif current_items:
+                    top_items = current_items
+                current_label = item.get("场景标签", "unknown")
+                current_items = [item]
+            else:
+                if current_label is None:
+                    top_items.append(item)
+                else:
+                    current_items.append(item)
+
+        if current_label is not None:
+            label_groups.append((current_label, current_items))
+        elif current_items:
+            top_items = current_items
+
+        sheet_count = 0
+        if top_items or label_groups:
+            first_name = label_groups[0][0] if label_groups else "script"
+            first_items = top_items + (label_groups[0][1] if label_groups else [])
+            _write_sheet(wb, first_name, first_items)
+            sheet_count += 1
+
+        for label_name, items in label_groups[1:]:
+            _write_sheet(wb, label_name, items)
+            sheet_count += 1
+
     wb.save(output_path)
     print(f"Excel saved: {output_path}")
-    print(f"   {row_num - 1} rows total")
+    print(f"   {sum(1 for r in rows if r.get('_type') != 'blank')} rows / {len(wb.worksheets)} sheet(s)")
 
 
 def _strip_quotes(s: str) -> str:
@@ -612,7 +833,8 @@ def _interactive_convert():
     except UnicodeDecodeError:
         print(f"[ERROR] 文件编码错误，请确认是 .rpy 文本文件而非 .xlsx 二进制文件。")
         return
-    write_excel(rows, out)
+    split = input("按 label 拆分为多 Sheet？(Y/n)：").strip().lower()
+    write_excel(rows, out, split_sheets=(split != "n"))
 
 
 def interactive_mode():
@@ -673,8 +895,9 @@ def main():
         print(f"[ERROR] File not found: {input_path}")
         sys.exit(1)
 
+    no_split = "--no-split" in sys.argv
     rows = parse_rpy(input_path)
-    write_excel(rows, output_path)
+    write_excel(rows, output_path, split_sheets=not no_split)
 
 
 if __name__ == "__main__":

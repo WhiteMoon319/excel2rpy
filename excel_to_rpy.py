@@ -12,23 +12,39 @@ Ren'Py Excel 转 .rpy 脚本 — 新手友好版
 import argparse
 import os
 import sys
+import re
 from pathlib import Path
 
 try:
     from openpyxl import Workbook, load_workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.datavalidation import DataValidation
 except ImportError:
     print("请先安装 openpyxl：pip install openpyxl")
     sys.exit(1)
+
+# ── 列索引常量 ──────────────────────────────────────────────
+COL_SCENE_LABEL = 0
+COL_CMD = 1
+COL_IMAGE = 2
+COL_CHARACTER = 3
+COL_VARIABLE = 4     # 新增：变量名
+COL_DIALOGUE = 5     # 对话文本（原 4 → 5）
+COL_OPTION = 6       # 选项文本（原 5 → 6）
+COL_JUMP = 7         # 跳转目标（原 6 → 7）
+COL_AUDIO = 8        # 音频路径（原 7 → 8）
+COL_EFFECT = 9       # 位置/特效/属性（原 8 → 9）
+COL_NOTES = 10       # 备注（原 9 → 10）
 
 # ── 模板配置 ──────────────────────────────────────────────
 
 HEADERS = [
     ("场景标签", 16),
-    ("指令类型", 18),
+    ("指令类型", 20),
     ("图片/背景", 24),
     ("角色名", 14),
+    ("变量名", 14),      # 新增
     ("对话文本", 40),
     ("选项文本", 20),
     ("跳转目标", 16),
@@ -37,8 +53,22 @@ HEADERS = [
     ("备注", 20),
 ]
 
-# 指令类型下拉选项（中文翻译方便新手，解析时取"（"前的英文部分）
+# 结构化变量条件运算符映射
+VARIABLE_OP_MAP = {
+    "variable_eq": "==",
+    "variable_ne": "!=",
+    "variable_gt": ">",
+    "variable_ge": ">=",
+    "variable_lt": "<",
+    "variable_le": "<=",
+}
+
+# 变量开关下拉选项
+VARIABLE_TOGGLE_VALUES = ["true", "false"]
+
+# 指令类型下拉选项
 COMMAND_TYPES = [
+    # 原有指令（保持不变）
     "label（场景标签）",
     "scene（背景图）",
     "show（显示角色）",
@@ -50,10 +80,6 @@ COMMAND_TYPES = [
     "jump（跳转）",
     "call（调用子场景）",
     "return（返回）",
-    "$（设置变量）",
-    "if（条件判断）",
-    "elif（否则如果）",
-    "else（否则）",
     "play_music（播放BGM）",
     "stop_music（停止BGM）",
     "queue_music（排队播BGM）",
@@ -63,10 +89,36 @@ COMMAND_TYPES = [
     "pause（暂停等待）",
     "player_input（玩家输入）",
     "window（对话框开关）",
+    # 定义类
     "define_character（定义角色）",
+    "define_variable（定义变量）",
+    "define_image（定义图片）",
+    # 操作类
+    "variable_set（变量赋值）",
+    "variable_change（变量增减）",
+    "variable_toggle（变量开关）",
+    # 条件类（结构化）
+    "variable_eq（变量=）",
+    "variable_ne（变量≠）",
+    "variable_gt（变量>）",
+    "variable_ge（变量≥）",
+    "variable_lt（变量<）",
+    "variable_le（变量≤）",
+    # 传统 if/elif/else 和 $ 保留
+    "$（设置变量）",
+    "if（条件判断）",
+    "elif（否则如果）",
+    "else（否则）",
+    # 向后兼容旧指令
     "default（默认变量）",
     "image（定义图片）",
 ]
+
+# 兼容旧指令 → 新指令的映射（rpy_to_excel 反向解析用）
+OLD_CMD_ALIASES = {
+    "default": "define_variable",
+    "image": "define_image",
+}
 
 # 样式
 HEADER_FILL = PatternFill(start_color="2F5496", end_color="2F5496", fill_type="solid")
@@ -83,13 +135,105 @@ THIN_BORDER = Border(
 ALT_FILL = PatternFill(start_color="D6E4F0", end_color="D6E4F0", fill_type="solid")
 
 
-def generate_template(output_path: str):
-    """生成 Excel 模板文件"""
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "script"
+# ── 扫描已有脚本 ──────────────────────────────────────────
 
-    # 写表头
+def scan_existing_scripts(game_dir: str = "game"):
+    """
+    扫描 game/ 目录下的 .rpy 文件和图片文件，提取已有定义。
+
+    返回: (characters, variables, image_defs, image_files)
+        - characters: set, define 定义的角色名
+        - variables: set, default 定义的变量名
+        - image_defs: set, image 定义的图片标识名
+        - image_files: list, game/ 下找到的图片文件路径（无 image 定义的）
+    """
+    characters = set()
+    variables = set()
+    image_defs = {}  # 定义名 → 文件路径
+
+    game_path = Path(game_dir)
+    if not game_path.is_dir():
+        return characters, variables, set(), []
+
+    rpy_files = list(game_path.glob("*.rpy")) + list(game_path.rglob("*.rpy"))
+
+    for rpy_file in rpy_files:
+        try:
+            content = rpy_file.read_text(encoding="utf-8-sig")
+        except Exception:
+            continue
+        for line in content.splitlines():
+            line = line.strip()
+            if line.startswith("#"):
+                continue
+            # define 角色名
+            m = re.match(r'define\s+(\w+)\s*=\s*Character', line)
+            if m:
+                characters.add(m.group(1))
+            # default 变量名
+            m = re.match(r'default\s+(\w+)\s*=', line)
+            if m:
+                variables.add(m.group(1))
+            # image 定义
+            m = re.match(r'image\s+([^=\s]+(?:\s+[^=\s]+)*)\s*=\s*(.+)', line)
+            if m:
+                img_name = m.group(1).strip()
+                img_val = m.group(2).strip()
+                if (img_val.startswith('"') and img_val.endswith('"')) or \
+                   (img_val.startswith("'") and img_val.endswith("'")):
+                    img_val = img_val[1:-1]
+                image_defs[img_name] = img_val
+
+    # 扫描图片文件
+    image_extensions = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+    image_files = []
+    defined_paths = set(image_defs.values())
+    defined_paths.update(image_defs.keys())
+
+    for ext in image_extensions:
+        for img_file in game_path.glob(f"**/*{ext}"):
+            rel = str(img_file).replace("\\", "/")
+            # 有 image 定义的只用定义名，不用文件路径
+            if rel not in defined_paths:
+                image_files.append(rel)
+
+    return characters, variables, set(image_defs.keys()), image_files
+
+
+def _add_dropdown_validation(ws, col_letter, items, row_range="2:10000"):
+    """添加下拉验证，列表过长时写入隐藏辅助 Sheet"""
+    if not items:
+        return
+    sorted_items = sorted(str(i) for i in items)
+    # 大约估算：逗号分隔 + 引号
+    combined = '"' + ",".join(sorted_items) + '"'
+    if len(combined) <= 255:
+        dv = DataValidation(type="list", formula1=combined, allow_blank=True)
+        dv.add(f"{col_letter}{row_range}")
+        ws.add_data_validation(dv)
+    else:
+        wb = ws.parent
+        helper_name = f"_dd_{col_letter.replace('$', '')}"
+        if helper_name in wb.sheetnames:
+            del wb[helper_name]
+        helper = wb.create_sheet(helper_name)
+        helper.sheet_state = "hidden"
+        for i, item in enumerate(sorted_items, start=1):
+            helper.cell(row=i, column=1, value=item)
+        dv = DataValidation(
+            type="list",
+            formula1=f"={helper_name}!$A$1:$A${len(sorted_items)}",
+            allow_blank=True,
+        )
+        dv.add(f"{col_letter}{row_range}")
+        ws.add_data_validation(dv)
+
+
+def _setup_sheet_header_and_dropdowns(
+    ws, scanned_characters, scanned_variables, scanned_images, scanned_files
+):
+    """为单个 Sheet 写入表头并添加下拉验证"""
+    # 表头
     for col_idx, (header, width) in enumerate(HEADERS, start=1):
         cell = ws.cell(row=1, column=col_idx, value=header)
         cell.font = HEADER_FONT
@@ -97,12 +241,9 @@ def generate_template(output_path: str):
         cell.alignment = HEADER_ALIGN
         cell.border = THIN_BORDER
         ws.column_dimensions[get_column_letter(col_idx)].width = width
-
     ws.row_dimensions[1].height = 24
 
-    # 指令类型下拉
-    from openpyxl.worksheet.datavalidation import DataValidation
-
+    # 指令类型下拉（列 B → COL_CMD+1=2）
     cmd_formula = '"' + ",".join(COMMAND_TYPES) + '"'
     dv = DataValidation(type="list", formula1=cmd_formula, allow_blank=True)
     dv.error = "请从下拉列表选择指令类型"
@@ -112,316 +253,304 @@ def generate_template(output_path: str):
     dv.add("B2:B10000")
     ws.add_data_validation(dv)
 
-    # 预填示例数据（带变量和条件分支）
-    sample_data = [
-        ["start", "label（场景标签）", "", "", "", "", "", "", "", "游戏开始"],
-        ["", "scene（背景图）", "images/bg_classroom.jpg", "", "", "", "", "", "with dissolve", "教室背景"],
-        ["", "play_music（播放BGM）", "", "", "", "", "", "audio/bgm_happy.ogg", "", ""],
-        ["", "narrator（旁白）", "", "", "你醒来发现自己在一间教室里……", "", "", "", "", ""],
-        ["", "player_input（玩家输入）", "", "player_name", "请输入你的名字：", "", "", "", "无名", "让玩家输入主角名"],
-        ["", "show（显示角色）", "", "eileen", "", "", "", "", "at left", "角色出现在左边"],
-        ["", "dialogue（角色对话）", "", "eileen", "你好，[player_name]！欢迎来到这个世界！", "", "", "", "", "用 [变量名] 引用输入"],
-        ["", "dialogue（角色对话）", "", "eileen", "你今天想做什么呢？", "", "", "", "", ""],
-        ["", "menu（选择菜单）", "", "", "", "", "", "", "", "玩家做选择"],
-        ["", "menu_option（菜单选项）", "", "", "", "去图书馆 📚", "library", "", "", ""],
-        ["", "menu_option（菜单选项）", "", "", "", "去操场 🏃", "playground", "", "", ""],
-        ["", "menu_option（菜单选项）", "", "", "", "回家 🏠", "go_home", "", "", ""],
+    # 角色名下拉（列 D → COL_CHARACTER+1=4）
+    if scanned_characters:
+        _add_dropdown_validation(ws, "D", scanned_characters)
+
+    # 变量名下拉（列 E → COL_VARIABLE+1=5）
+    if scanned_variables:
+        _add_dropdown_validation(ws, "E", scanned_variables)
+
+    # 图片下拉（列 C → COL_IMAGE+1=3）：image 定义名 + 文件路径
+    all_image_refs = set(scanned_images)
+    all_image_refs.update(scanned_files)
+    if all_image_refs:
+        _add_dropdown_validation(ws, "C", all_image_refs)
+
+    # 变量开关值下拉（列 F 当指令类型为 variable_toggle 时使用）
+    # 由于 openpyxl 不支持条件下拉，这里使用 DataValidation 的 allow_blank
+    # 在 "变量开关" 行填对话文本列，用户手动选 true/false
+    toggle_formula = '"true,false"'
+    dv_toggle = DataValidation(type="list", formula1=toggle_formula, allow_blank=True)
+    dv_toggle.error = "请选择 true 或 false"
+    dv_toggle.errorTitle = "无效值"
+    dv_toggle.add("F2:F10000")
+    ws.add_data_validation(dv_toggle)
+
+    ws.freeze_panes = "A2"
+
+
+# ── 模板生成 ──────────────────────────────────────────────
+
+def _get_template_data(scanned_characters, scanned_variables, scanned_images, scanned_files):
+    """返回模板数据（所有 Sheet 的行数据），供 generate_template 和 generate_blank_template 共用"""
+    # 每个Sheet的数据结构：[(sheet_name, rows)], rows = [[col0..col10], ...]
+    # 注：需要返回列表，因为 _add_sheet 内部会修改数据
+
+    # ── Sheet 1: 入门演示 ──
+    sheet_basic = [
+        ["start", "label（场景标签）", "", "", "", "", "", "", "", "", "游戏开始"],
+        ["", "scene（背景图）", "images/bg_classroom.jpg", "", "", "", "", "", "", "溶解", "场景渐变（溶解=dissolve）"],
+        ["", "play_music（播放BGM）", "", "", "", "", "", "audio/bgm_happy.ogg", "", "", "播放背景音乐"],
+        ["", "narrator（旁白）", "", "", "", "你醒来发现自己在一间教室里……", "", "", "", "", ""],
+        ["", "narrator（旁白）", "", "", "", "周围很安静，阳光从窗户洒进来。", "", "", "", "", ""],
+        ["", "show（显示角色）", "", "主角", "", "", "", "", "", "左边", "角色出现在左边（角色名可留空沿用上一行）"],
+        ["", "dialogue（角色对话）", "", "主角", "", "这里就是新学校吗？", "", "", "", "", ""],
+        ["", "dialogue（角色对话）", "", "", "", "得先去教室报到才行。", "", "", "", "", "角色名留空=沿用上一行（主角）"],
         ["", "", "", "", "", "", "", "", "", "", ""],
-        # 图书馆分支：展示变量和条件
-        ["library", "label（场景标签）", "", "", "", "", "", "", "", "图书馆场景"],
-        ["", "scene（背景图）", "images/bg_library.jpg", "", "", "", "", "", "", ""],
-        ["", "dialogue（角色对话）", "", "eileen", "这里好安静啊。", "", "", "", "", ""],
-        ["", "dialogue（角色对话）", "", "eileen", "你找到了一本好书，知识增加了！", "", "", "", "", ""],
-        ["", "$（设置变量）", "", "", "knowledge += 1", "", "", "", "", "变量 knowledge 加 1"],
-        ["", "dialogue（角色对话）", "", "eileen", "你还想继续探索吗？", "", "", "", "", ""],
-        ["", "if（条件判断）", "", "", "knowledge >= 2", "", "", "", "", "如果知识≥2 → 分支"],
-        ["", "dialogue（角色对话）", "", "eileen", "你已经读了不少书了！真棒！", "", "", "", "", "条件成立时执行"],
-        ["", "jump（跳转）", "", "", "", "", "start", "", "", ""],
-        ["", "else（否则）", "", "", "", "", "", "", "", "条件不成立时"],
-        ["", "dialogue（角色对话）", "", "eileen", "再多读一本书吧~", "", "", "", "", "条件不成立时执行"],
-        ["", "jump（跳转）", "", "", "", "", "library", "", "", ""],
+        ["", "show（显示角色）", "", "同学A", "", "", "", "", "", "右边", "第二个角色入场"],
+        ["", "dialogue（角色对话）", "", "同学A", "", "你是新来的吗？", "", "", "", "", ""],
+        ["", "dialogue（角色对话）", "", "", "", "我叫小美，欢迎你！", "", "", "", "", ""],
+        ["", "hide（隐藏角色）", "", "同学A", "", "", "", "", "", "", "同学A退场"],
         ["", "", "", "", "", "", "", "", "", "", ""],
-        # 操场分支
-        ["playground", "label（场景标签）", "", "", "", "", "", "", "", "操场场景"],
-        ["", "scene（背景图）", "images/bg_playground.jpg", "", "", "", "", "", "", ""],
-        ["", "dialogue（角色对话）", "", "eileen", "天气真好！适合运动！", "", "", "", "", ""],
-        ["", "show（显示角色）", "", "eileen", "", "", "", "", "happy smile", "切换为高兴表情"],
-        ["", "dialogue（角色对话）", "", "eileen", "跑起来好舒服！", "", "", "", "", ""],
-        ["", "$（设置变量）", "", "", "health += 1", "", "", "", "", "设置变量"],
-        ["", "return（返回）", "", "", "", "", "", "", "", ""],
-        ["", "", "", "", "", "", "", "", "", "", ""],
-        # 黑屏大字示例：常用于章节标题、日期地点提示
-        ["chapter_title", "label（场景标签）", "", "", "", "", "", "", "", "黑屏大字演示"],
-        ["", "window（对话框开关）", "", "", "hide", "", "", "", "", "隐藏对话框，纯黑屏"],
-        ["", "scene（背景图）", "black", "", "", "", "", "", "", "black=纯黑背景"],
-        ["", "narrator（旁白）", "", "", "第一章", "", "", "", "", "旁白=居中大字"],
-        ["", "pause（暂停等待）", "", "", "2.0", "", "", "", "", "停留2秒"],
-        ["", "narrator（旁白）", "", "", "启程之日", "", "", "", "", ""],
-        ["", "pause（暂停等待）", "", "", "2.0", "", "", "", "", ""],
-        ["", "window（对话框开关）", "", "", "show", "", "", "", "", "恢复对话框显示"],
-        ["", "jump（跳转）", "", "", "", "", "start", "", "", ""],
-        ["", "", "", "", "", "", "", "", "", "", ""],
-        # 回家分支
-        ["go_home", "label（场景标签）", "", "", "", "", "", "", "", "回家场景"],
-        ["", "scene（背景图）", "images/bg_home.jpg", "", "", "", "", "", "", ""],
-        ["", "voice（配音）", "", "", "", "", "", "audio/voice/eileen_home.ogg", "", "配音紧跟的对话"],
-        ["", "dialogue（角色对话）", "", "eileen", "回家休息啦~", "", "", "", "", ""],
-        ["", "return（返回）", "", "", "", "", "", "", "", ""],
+        ["", "dialogue（角色对话）", "", "主角", "", "看来这里的人都很友善呢。", "", "", "", "", ""],
+        ["", "stop_music（停止BGM）", "", "", "", "", "", "", "fadeout 2.0", "", "音乐淡出2秒"],
+        ["", "jump（跳转）", "", "", "", "", "", "menu_demo", "", "", "", "跳到选择分支演示"],
     ]
 
-    for row_idx, row_data in enumerate(sample_data, start=2):
-        for col_idx, value in enumerate(row_data, start=1):
-            cell = ws.cell(row=row_idx, column=col_idx, value=value)
-            cell.font = CELL_FONT
-            cell.alignment = CELL_ALIGN
-            cell.border = THIN_BORDER
-            if row_idx % 2 == 0:
-                cell.fill = ALT_FILL
-        ws.row_dimensions[row_idx].height = 20
+    # ── Sheet 2: 选择分支 ──
+    sheet_menu = [
+        ["menu_demo", "label（场景标签）", "", "", "", "", "", "", "", "", "选择分支演示"],
+        ["", "dialogue（角色对话）", "", "主角", "", "放学后要做什么呢？", "", "", "", "", ""],
+        ["", "menu（选择菜单）", "", "", "", "", "", "", "", "", "弹出选项"],
+        ["", "menu_option（菜单选项）", "", "", "", "", "去图书馆", "jump library_scene", "", "", ""],
+        ["", "menu_option（菜单选项）", "", "", "", "", "去操场", "jump playground_scene", "", "", ""],
+        ["", "menu_option（菜单选项）", "", "", "", "", "直接回家", "return", "", "", ""],
+        ["", "", "", "", "", "", "", "", "", "", ""],
+        ["library_scene", "label（场景标签）", "", "", "", "", "", "", "", "", "图书馆场景"],
+        ["", "scene（背景图）", "images/bg_library.jpg", "", "", "", "", "", "", "褪色", "褪色=fade"],
+        ["", "dialogue（角色对话）", "", "主角", "", "今天读了不少书，很有收获。", "", "", "", "", ""],
+        ["", "variable_change（变量增减）", "", "", "knowledge", "1", "", "", "", "", "变量 knowledge +1"],
+        ["", "variable_ge（变量≥）", "", "", "knowledge", "3", "", "", "", "", "如果 knowledge ≥ 3"],
+        ["", "dialogue（角色对话）", "", "主角", "", "我已经读了很多书了！", "", "", "", "", "条件成立时执行"],
+        ["", "jump（跳转）", "", "", "", "", "", "menu_demo", "", "", ""],
+        ["", "else（否则）", "", "", "", "", "", "", "", "", "条件不成立"],
+        ["", "dialogue（角色对话）", "", "主角", "", "再多读一会儿吧~", "", "", "", "", "条件不成立时执行"],
+        ["", "jump（跳转）", "", "", "", "", "", "library_scene", "", "", ""],
+        ["", "", "", "", "", "", "", "", "", "", ""],
+        ["playground_scene", "label（场景标签）", "", "", "", "", "", "", "", "", "操场场景"],
+        ["", "scene（背景图）", "images/bg_playground.jpg", "", "", "", "", "", "", "闪白", "闪白=Fade(0.1,0,0.5)"],
+        ["", "dialogue（角色对话）", "", "主角", "", "运动完真舒服！", "", "", "", "", ""],
+        ["", "variable_change（变量增减）", "", "", "health", "1", "", "", "", "", ""],
+        ["", "jump（跳转）", "", "", "", "", "", "menu_demo", "", "", ""],
+        ["", "", "", "", "", "", "", "", "", "", ""],
+        ["multi_check", "label（场景标签）", "", "", "", "", "", "", "", "", "多重条件校验演示"],
+        ["", "narrator（旁白）", "", "", "", "多重条件判断：", "", "", "", "", ""],
+        ["", "variable_set（变量赋值）", "", "", "score", "80", "", "", "", "", "结构化变量赋值"],
+        ["", "variable_set（变量赋值）", "", "", "love", "75", "", "", "", "", ""],
+        ["", "if（条件判断）", "", "", "", "score >= 80 and love >= 70", "", "", "", "", "复杂条件仍然用 if"],
+        ["", "dialogue（角色对话）", "", "主角", "", "完美！好感度和分数都够了！", "", "", "", "", ""],
+        ["", "elif（否则如果）", "", "", "", "score >= 80 or love >= 70", "", "", "", "", "复杂条件用 elif"],
+        ["", "dialogue（角色对话）", "", "主角", "", "还差一点点……", "", "", "", "", ""],
+        ["", "else（否则）", "", "", "", "", "", "", "", "", "都不达标→坏结局"],
+        ["", "dialogue（角色对话）", "", "主角", "", "看来要多努力了……", "", "", "", "", ""],
+        ["", "", "", "", "", "", "", "", "", "", ""],
+        ["", "narrator（旁白）", "", "", "", "复杂条件写法（传统 if，保留）：", "", "", "", "", ""],
+        ["", "if（条件判断）", "", "", "", "has_key and not is_locked", "", "", "", "", ""],
+        ["", "if（条件判断）", "", "", "", "money >= 100 or has_discount", "", "", "", "", ""],
+        ["", "jump（跳转）", "", "", "", "", "", "menu_demo", "", "", ""],
+    ]
 
-    # 冻结首行
-    ws.freeze_panes = "A2"
+    # ── Sheet 3: 音频控制 ──
+    sheet_audio = [
+        ["audio_demo", "label（场景标签）", "", "", "", "", "", "", "", "", "音频演示"],
+        ["", "play_music（播放BGM）", "", "", "", "", "", "audio/bgm_calm.ogg", "", "", "播放BGM"],
+        ["", "narrator（旁白）", "", "", "", "背景音乐响起……", "", "", "", "", ""],
+        ["", "queue_music（排队播BGM）", "", "", "", "", "", "audio/bgm_tense.ogg", "", "", ""],
+        ["", "narrator（旁白）", "", "", "", "气氛渐渐紧张起来。", "", "", "", "", ""],
+        ["", "stop_music（停止BGM）", "", "", "", "", "", "", "fadeout 1.0", "", ""],
+        ["", "", "", "", "", "", "", "", "", "", ""],
+        ["", "play_sound（播放音效）", "", "", "", "", "", "audio/sfx_door.ogg", "", "", ""],
+        ["", "narrator（旁白）", "", "", "", "咚咚咚。", "", "", "", "", ""],
+        ["", "stop_sound（停止音效）", "", "", "", "", "", "", "", "", ""],
+        ["", "", "", "", "", "", "", "", "", "", ""],
+        ["", "voice（配音）", "", "", "", "", "", "audio/voice/line01.ogg", "", "", ""],
+        ["", "dialogue（角色对话）", "", "主角", "", "你好，我叫小明。", "", "", "", "", ""],
+    ]
+
+    # ── Sheet 4: 特效演示 ──
+    sheet_effects = [
+        ["effect_demo", "label（场景标签）", "", "", "", "", "", "", "", "", "特效/位置中文演示"],
+        ["", "scene（背景图）", "images/bg_room.jpg", "", "", "", "", "", "", "溶解", ""],
+        ["", "narrator（旁白）", "", "", "", "常用转场：", "", "", "", "", ""],
+        ["", "scene（背景图）", "images/bg_room.jpg", "", "", "", "", "", "", "褪色", ""],
+        ["", "scene（背景图）", "black", "", "", "", "", "", "", "闪白", ""],
+        ["", "scene（背景图）", "images/bg_room.jpg", "", "", "", "", "", "", "像素化", ""],
+        ["", "scene（背景图）", "images/bg_room.jpg", "", "", "", "", "", "", "横向振动", ""],
+        ["", "scene（背景图）", "images/bg_room.jpg", "", "", "", "", "", "", "纵向振动", ""],
+        ["", "", "", "", "", "", "", "", "", "", ""],
+        ["", "narrator（旁白）", "", "", "", "常用位置：", "", "", "", "", ""],
+        ["", "show（显示角色）", "", "主角", "", "", "", "", "", "左边", ""],
+        ["", "show（显示角色）", "", "主角", "", "", "", "", "", "右边", ""],
+        ["", "show（显示角色）", "", "主角", "", "", "", "", "", "中间", ""],
+        ["", "show（显示角色）", "", "主角", "", "", "", "", "", "左外", ""],
+        ["", "", "", "", "", "", "", "", "", "", ""],
+        ["", "narrator（旁白）", "", "", "", "组合使用：", "", "", "", "", ""],
+        ["", "show（显示角色）", "", "同学A", "", "", "", "", "", "右边 溶解", "位置+转场 空格分隔"],
+        ["", "show（显示角色）", "", "主角", "", "", "", "", "", "左边 褪色", "英文也支持：at left with dissolve"],
+    ]
+
+    # ── Sheet 5: 变量与输入 ──
+    sheet_vars = [
+        ["var_demo", "label（场景标签）", "", "", "", "", "", "", "", "", "结构化变量和输入演示"],
+        ["", "define_variable（定义变量）", "", "", "score", "0", "", "", "", "", "结构化变量定义"],
+        ["", "define_variable（定义变量）", "", "", "has_key", "False", "", "", "", "", ""],
+        ["", "define_variable（定义变量）", "", "", "money", "100", "", "", "", "", ""],
+        ["", "", "", "", "", "", "", "", "", "", ""],
+        ["", "narrator（旁白）", "", "", "", "让我们来设置一些变量。", "", "", "", "", ""],
+        ["", "variable_change（变量增减）", "", "", "score", "10", "", "", "", "", "变量 +10"],
+        ["", "variable_set（变量赋值）", "", "", "money", "200", "", "", "", "", "变量赋值 200"],
+        ["", "variable_toggle（变量开关）", "", "", "has_key", "true", "", "", "", "", "开关设为 true"],
+        ["", "", "", "", "", "", "", "", "", "", ""],
+        ["", "player_input（玩家输入）", "", "player_name", "", "请输入你的名字：", "", "", "无名", "", ""],
+        ["", "dialogue（角色对话）", "", "主角", "", "你好，[player_name]！", "", "", "", "", ""],
+        ["", "", "", "", "", "", "", "", "", "", ""],
+        ["", "narrator（旁白）", "", "", "", "结构化条件判断：", "", "", "", "", ""],
+        ["", "variable_ge（变量≥）", "", "", "score", "50", "", "", "", "", "如果 score ≥ 50"],
+        ["", "dialogue（角色对话）", "", "主角", "", "及格了！", "", "", "", "", ""],
+        ["", "variable_lt（变量<）", "", "", "score", "30", "", "", "", "", "否则如果 score < 30"],
+        ["", "dialogue（角色对话）", "", "主角", "", "还差很多……", "", "", "", "", ""],
+        ["", "else（否则）", "", "", "", "", "", "", "", "", "否则"],
+        ["", "dialogue（角色对话）", "", "主角", "", "还需要加把劲。", "", "", "", "", ""],
+        ["", "", "", "", "", "", "", "", "", "", ""],
+        ["", "call（调用子场景）", "", "", "", "", "", "audio_demo", "", "", ""],
+        ["", "return（返回）", "", "", "", "", "", "", "", "", ""],
+    ]
+
+    # ── Sheet 6: 高级技巧 ──
+    sheet_advanced = [
+        ["advanced", "label（场景标签）", "", "", "", "", "", "", "", "", "高级技巧演示"],
+        ["", "scene（背景图）", "black", "", "", "", "", "", "", "", ""],
+        ["", "window（对话框开关）", "", "", "", "hide", "", "", "", "", "隐藏对话框"],
+        ["", "narrator（旁白）", "", "", "", "第一章", "", "", "", "", "centered"],
+        ["", "pause（暂停等待）", "", "", "", "2.0", "", "", "", "", ""],
+        ["", "narrator（旁白）", "", "", "", "启程之日", "", "", "", "", "centered"],
+        ["", "pause（暂停等待）", "", "", "", "2.0", "", "", "", "", ""],
+        ["", "window（对话框开关）", "", "", "", "show", "", "", "", "", "恢复对话框"],
+        ["", "jump（跳转）", "", "", "", "", "", "start", "", "", ""],
+    ]
+
+    # ── Sheet 7: 角色与图片定义 ──
+    sheet_defines = [
+        ["", "define_character（定义角色）", "", "主角", "", 'Character("小明", color="#4a90d9")', "", "", "", "", "定义角色名和颜色"],
+        ["", "define_character（定义角色）", "", "同学A", "", "", "", "", "", "", "省略参数=默认 Character"],
+        ["", "define_variable（定义变量）", "", "", "money", "100", "", "", "", "", "结构化变量定义"],
+        ["", "", "", "", "", "", "", "", "", "", ""],
+        ["", "define_image（定义图片）", "images/bg_room.jpg", "", "bg_room", "", "", "", "", "", "图片定义：列C填路径，列E填标识名"],
+        ["", "define_image（定义图片）", "images/hero_happy.png", "", "主角 happy", "", "", "", "", "", "带属性图片"],
+        ["", "define_image（定义图片）", 'Transform("images/bg.jpg", size=(1920,1080))', "", "bg_custom", "", "", "", "", "", "函数调用直接写"],
+    ]
+
+    sheets = [
+        ("入门演示", sheet_basic),
+        ("选择分支", sheet_menu),
+        ("音频控制", sheet_audio),
+        ("特效演示", sheet_effects),
+        ("变量与输入", sheet_vars),
+        ("高级技巧", sheet_advanced),
+        ("角色与图片定义", sheet_defines),
+    ]
+    return sheets
+
+
+def generate_template(output_path: str):
+    """生成 Excel 模板文件（多 Sheet 分功能演示）"""
+    wb = Workbook()
+
+    scanned_characters, scanned_variables, scanned_images, scanned_files = scan_existing_scripts()
+
+    def _add_sheet(title: str, data_rows: list):
+        if wb.worksheets[0].title == "Sheet":
+            ws = wb.active
+            ws.title = title
+        else:
+            ws = wb.create_sheet(title)
+        _setup_sheet_header_and_dropdowns(
+            ws, scanned_characters, scanned_variables, scanned_images, scanned_files
+        )
+        # 数据
+        for row_idx, row_data in enumerate(data_rows, start=2):
+            for col_idx, value in enumerate(row_data, start=1):
+                cell = ws.cell(row=row_idx, column=col_idx, value=value)
+                cell.font = CELL_FONT
+                cell.alignment = CELL_ALIGN
+                cell.border = THIN_BORDER
+                if row_idx % 2 == 0:
+                    cell.fill = ALT_FILL
+            ws.row_dimensions[row_idx].height = 20
+
+    sheets = _get_template_data(
+        scanned_characters, scanned_variables, scanned_images, scanned_files
+    )
+    for sheet_name, data in sheets:
+        _add_sheet(sheet_name, data)
 
     # ── 使用说明 Sheet ──
     ws_help = wb.create_sheet("使用说明")
     help_lines = [
         "═══════════════════════════════════════════",
-        "  Ren'Py Excel → .rpy 转换工具 · 新手使用指南",
+        "  Ren'Py Excel → .rpy 转换工具 · 使用指南",
         "═══════════════════════════════════════════",
         "",
-        "【一】指令类型速查表",
-        "───────────────────────────────────────────",
-        "  label（场景标签）     → 开始一个新场景，在「场景标签」列写标签名（如 start）",
-        "  scene（背景图）       → 切换背景图，在「图片/背景」列填图片路径",
-        "  show（显示角色）      → 显示角色立绘，填「角色名」+「图片/背景」+「位置/特效」",
-        "  hide（隐藏角色）      → 隐藏某个角色立绘，填「角色名」",
-        "  dialogue（角色对话）  → 角色说话，填「角色名」+「对话文本」",
-        "  narrator（旁白）      → 画外音/旁白，只填「对话文本」",
-        "  menu（选择菜单）      → 弹出选项给玩家选，后面必须跟 menu_option 行",
-        "  menu_option（菜单选项）→ 一个选项，填「选项文本」+「跳转目标」（跳到哪个场景）",
-        "  jump（跳转）          → 跳到指定场景，填「跳转目标」",
-        "  call（调用子场景）    → 调用子场景（可 return 返回），填「跳转目标」",
-        "  return（返回）        → 返回/结束当前场景",
-        "  $（设置变量）         → 修改变量值，在「对话文本」列写代码（如 score += 10）",
-        "  if（条件判断）        → 条件分支开始，在「对话文本」列写条件（如 score >= 50）",
-        "  elif（否则如果）      → 上一个 if 不成立时的备选条件",
-        "  else（否则）          → 所有条件都不成立时",
-        "  play_music（播放BGM） → 播放背景音乐，「音频路径」",
-        "  stop_music（停止BGM） → 停止背景音乐",
-        "  queue_music（排队播BGM）→ 当前BGM播完后自动切换，「音频路径」",
-        "  play_sound（播放音效）→ 播放音效，「音频路径」",
-        "  stop_sound（停止音效）→ 停止正在播放的音效",
-        "  voice（配音）         → 播放语音（对话前使用），「音频路径」",
-        "  pause（暂停等待）     → 等待若干秒，「对话文本」列填秒数（如 2.5）",
-        "  player_input（玩家输入）→ 弹出输入框让玩家打字，填「角色名」（变量名）+「对话文本」（提示）",
-        "  window（对话框开关）  → 控制对话框显示/隐藏，「对话文本」填 show/hide/auto",
+        "【新增功能（v2）】结构化变量 + 图片管理",
+        "  11 列表格（原 10 列 + 新增「变量名」列）：",
+        "    A 场景标签  B 指令类型  C 图片/背景  D 角色名",
+        "    E 变量名    F 对话文本  G 选项文本  H 跳转目标",
+        "    I 音频路径  J 位置/特效  K 备注",
         "",
-        "【二】位置/特效列 · 常用值",
-        "───────────────────────────────────────────",
-        "  角色的位置（show/hide 时使用）：",
-        "    at left             → 屏幕左侧",
-        "    at right            → 屏幕右侧",
-        "    at center           → 屏幕正中",
-        "    at offscreenleft    → 屏幕左侧外面（配合 move 移入）",
-        "    at offscreenright   → 屏幕右侧外面",
-        "    at truecenter       → 绝对居中",
+        "  · 角色名列：只填角色（dialogue / show / hide / 角色定义）",
+        "  · 变量名列：只填变量（变量定义 / 赋值 / 增减 / 开关 / 条件比较）",
+        "  · 图片列：下拉可选择已定义的 image 名或图片文件路径",
         "",
-        "  转场特效（scene/show 切换画面时使用）：",
-        "    with dissolve       → 淡入淡出（最常用）",
-        "    with fade           → 黑屏渐入",
-        "    with pixellate      → 像素化过渡",
-        "    with moveinleft     → 从左边滑入",
-        "    with moveinright    → 从右边滑入",
-        "    with hpunch         → 画面震动（打击感）",
-        "    with vpunch         → 画面上下震动",
+        "【结构化指令类型】",
+        "  定义类：",
+        "    角色定义（定义角色）  — 角色名列填名字，对话文本列填 Character(...)",
+        "    变量定义（定义变量）  — 变量名列填名字，对话文本列填初始值",
+        "    图片定义（定义图片）  — 图片/背景列填路径，变量名列填标识名",
+        "  操作类：",
+        "    变量赋值（变量赋值）  — 变量名列填变量名，对话文本列填新值",
+        "    变量增减（变量增减）  — 变量名列填变量名，对话文本列填增量（如 1 或 -3）",
+        "    变量开关（变量开关）  — 变量名列填变量名，对话文本列下拉选 true/false",
+        "  条件类：",
+        "    变量=（等于）         — 变量名列填变量名，对话文本列填纯数值",
+        "    变量≠（不等于）       — 同理",
+        "    变量>（大于）         — 同理",
+        "    变量≥（大于等于）     — 同理",
+        "    变量<（小于）         — 同理",
+        "    变量≤（小于等于）     — 同理",
+        "    else（否则）          — 传统 else",
+        "  复杂条件仍可用传统 if/elif（对话文本列写完整表达式）",
         "",
-        "【三】变量和条件 · 怎么写",
-        "───────────────────────────────────────────",
-        "  1. 先定义变量（在 Ren'Py 的 script.rpy 或任意 .rpy 开头）：",
-        "       default knowledge = 0",
-        "       default health = 0",
+        "【下拉菜单】",
+        "  · 角色名列：自动扫描 game/*.rpy 中的 define + 表中定义的",
+        "  · 变量名列：自动扫描 game/*.rpy 中的 default + 表中定义的",
+        "  · 图片列： 自动扫描 image 定义名 + game/ 下所有图片文件",
+        "  · 指令类型：固定下拉列表",
+        "  · 变量开关：固定 true / false 下拉",
         "",
-        "  2. 用 $（设置变量）修改：",
-        "       指令：$（设置变量）",
-        "       对话文本：knowledge += 1          ← 知识+1",
-        "       对话文本：score = score + 10      ← 分数+10",
-        "       对话文本：has_key = True          ← 获得钥匙",
+        "【智能填充】",
+        "  · 角色名/变量名列留空 → 自动沿用上一行的值",
+        "  · 指令类型留空 + 有角色名 → 自动当 dialogue",
+        "  · 指令类型留空 + 有文本 + 无角色 → 自动当 旁白",
+        "  · 角色名填「旁白」→ 自动切换 narrator",
         "",
-        "  3. 用 if（条件判断）做分支：",
-        "       指令：if（条件判断）",
-        "       对话文本：knowledge >= 2           ← 如果知识≥2",
-        "       （下面紧跟条件成立时要执行的指令，会自动缩进）",
+        "【中文术语】（位置/特效列可用中文）",
+        "  转场：溶解 褪色 闪白 像素化 横向振动 纵向振动 百叶窗 网格覆盖 擦除 滑入 滑出 推出",
+        "  位置：左边 右边 中间 真中 左外 右外",
+        "  空格分隔可组合：右边 溶解  →  at right with dissolve",
         "",
-        "       指令：else（否则）                  ← 条件不成立时",
-        "       （下面跟备选指令）",
-        "",
-        "  常用条件写法：",
-        "    score >= 60           → 分数大于等于60（及格线）",
-        "    has_key == True       → 拥有钥匙",
-        "    love >= 80            → 好感度≥80",
-        "    item_count > 0        → 拥有至少1个物品",
-        "",
-        "【四】选项后不同对话 · 两种写法",
-        "───────────────────────────────────────────",
-        "  写法A（推荐，结构清晰）：选项→跳转独立场景→在场景里写对话",
-        "    见模板示例：menu_option「去图书馆」→ jump 到 library 场景",
-        "    library 场景下有独立对话",
-        "",
-        "  写法B（简单，适合短分支）：用变量+if 判断",
-        "    菜单选项设置变量 → 同一个场景内用 if 判断显示不同对话",
-        "    示例：",
-        "      label choice_result:",
-        "          if choice == \"library\":",
-        "              e \"你去图书馆了。\"",
-        "          elif choice == \"playground\":",
-        "              e \"你去操场了。\"",
-        "",
-        "【五】填写注意事项",
-        "───────────────────────────────────────────",
-        "  1. 每行一个指令，按剧情顺序从上到下填写",
-        "  2. 「场景标签」列只在 label 行填写，其他行留空即可",
-        "  3. menu 后紧跟 menu_option，直到遇到其他指令或空行",
-        "  4. if 后紧跟条件成立的指令，直到 elif/else 或空行",
-        "  5. 空行用来分隔不同场景区块，会被跳过",
-        "  6. 图片/音频路径是相对于 Ren'Py 项目的 game/ 目录",
-        "  7. 对话文本中不要手动输入双引号，脚本会自动加",
-        "  8. 选项文本、角色名、对话支持 emoji（如 📚🏃🏠）",
-        "",
-        "【六】黑屏 + 居中大字 · 怎么写（章节标题 / 日期地点）",
-        "───────────────────────────────────────────",
-        "  在 Ren'Py 中显示「黑底白字居中大字」非常简单：",
-        "",
-        "  scene（背景图） ：「图片/背景」填 black  →  画面变纯黑",
-        "  narrator（旁白）：「对话文本」填你的大字内容  →  自动居中大字显示",
-        "  pause（暂停等待）：「对话文本」填秒数          →  停留几秒再继续",
-        "",
-        "  完整示例（Excel 中的几行）：",
-        "    scene（背景图）    → 图片/背景：black",
-        "    narrator（旁白）   → 对话文本：第一章",
-        "    pause（暂停等待）  → 对话文本：2.0",
-        "    narrator（旁白）   → 对话文本：启程之日",
-        "    pause（暂停等待）  → 对话文本：2.0",
-        "    jump（跳转）       → 跳转目标：start",
-        "",
-        "  生成的 .rpy：",
-        "    scene black",
-        '    "第一章"',
-        "    pause 2.0",
-        '    "启程之日"',
-        "    pause 2.0",
-        "    jump start",
-        "",
-        "【七】关于逐字显示（打字机效果）",
-        "───────────────────────────────────────────",
-        "  Ren'Py 默认就是逐字显示文本的，你不需要任何额外设置。",
-        "  脚本生成的角色对话、旁白，运行时都会自动逐字打出。",
-        "",
-        "  如果想控制速度，在「对话文本」中使用 {cps} 标签：",
-        '    原文："你好，欢迎来到这个世界！"',
-        '    慢速："{cps=20}你好，欢迎来到这个世界！{/cps}"',
-        "    cps = 每秒显示的字符数，默认约 40~50",
-        "",
-        "  常用文本标签（直接写在对话文本里即可）：",
-        "    {cps=30}文字{/cps}   → 指定逐字速度",
-        "    {w}                  → 等待玩家点击再继续显示",
-        "    {w=1.5}              → 等待 1.5 秒自动继续",
-        "    {p}                  → 段落停顿（等同于换行+等待点击）",
-        "    {b}文字{/b}          → 加粗",
-        "    {i}文字{/i}          → 斜体",
-        "    {size=+10}文字{/size}→ 放大字号",
-        "    {color=#ff0000}文字{/color} → 改变颜色",
-        "",
-        "【八】让玩家输入名字 · player_input 指令",
-        "───────────────────────────────────────────",
-        "  player_input（玩家输入）可以弹出输入框让玩家打字：",
-        "    「角色名」列 → 填变量名（如 player_name）",
-        "    「对话文本」列 → 填提示文字（如 请输入你的名字）",
-        "    「位置/特效」列 → 可选默认值（玩家不输入时使用，如 无名）",
-        "",
-        "  示例 Excel 行：",
-        "    player_input（玩家输入）→ 角色名：player_name",
-        "                            → 对话文本：请输入你的名字：",
-        "                            → 位置/特效：无名（默认值）",
-        "",
-        "  生成的 .rpy：",
-        "    $ player_name = renpy.input(\"请输入你的名字：\").strip() or \"无名\"",
-        "",
-        "【九】在对话中引用变量 · [变量名] 语法",
-        "───────────────────────────────────────────",
-        "  对话文本中使用方括号 [ ] 包裹变量名即可自动显示变量值：",
-        '    "你好，[player_name]！"           → 显示：你好，小明！',
-        '    "你的分数是 [score] 分。"         → 显示：你的分数是 85 分。',
-        '    "[player_name]，你的好感度是 [love]。"',
-        "",
-        "  注意：[ ] 里的变量必须事先通过 default / $ / player_input 定义过。",
-        "  这个功能是 Ren'Py 自带的「文本插值」，脚本无需特殊处理。",
-        "",
-        "【十】角色表情差分 · LayeredImage 部件拼合",
-        "───────────────────────────────────────────",
-        "  如果你的角色由多个部件拼成（本体+眼睛+嘴），",
-        "  推荐使用 Ren'Py 的 LayeredImage。",
-        "",
-        "  ★ 第一步：在 Ren'Py 项目的 .rpy 文件中定义 LayeredImage",
-        "  （建议写在单独文件如 characters.rpy 中，Excel 不负责这步）",
-        "",
-        "  layeredimage eileen:",
-        "      always \"eileen_base\"              # 本体（始终显示）",
-        "",
-        "      group eyes:                         # 眼睛组",
-        "          attribute normal default \"eileen_eyes_normal\"",
-        "          attribute happy \"eileen_eyes_happy\"",
-        "          attribute sad \"eileen_eyes_sad\"",
-        "          attribute surprise \"eileen_eyes_surprise\"",
-        "",
-        "      group mouth:                        # 嘴巴组",
-        "          attribute normal default \"eileen_mouth_normal\"",
-        "          attribute smile \"eileen_mouth_smile\"",
-        "          attribute frown \"eileen_mouth_frown\"",
-        "          attribute open \"eileen_mouth_open\"",
-        "",
-        "      group eyebrows:                     # 眉毛组（可选）",
-        "          attribute normal default \"eileen_brow_normal\"",
-        "          attribute angry \"eileen_brow_angry\"",
-        "",
-        "  ★ 第二步：用 image（定义图片）注册各部件图片",
-        "  可以在 Excel 中填写：",
-        "    image（定义图片） → 角色名：eileen_base",
-        "                       → 图片/背景：images/eileen/base.png",
-        "    image（定义图片） → 角色名：eileen_eyes_happy",
-        "                       → 图片/背景：images/eileen/eyes_happy.png",
-        "    ... 依次注册所有部件",
-        "",
-        "  ★ 第三步：在 Excel 中用 show 切换表情",
-        "  「位置/特效/属性」列直接填属性组合即可：",
-        "",
-        "    想显示的效果        → 指令       → 角色名  → 位置/特效/属性",
-        "    ─────────────────────────────────────────────────────────",
-        "    默认表情（普通）     → show      → eileen  → （留空）",
-        "    高兴               → show      → eileen  → happy smile",
-        "    悲伤+皱眉          → show      → eileen  → sad frown",
-        "    惊讶+张嘴          → show      → eileen  → surprise open",
-        "    高兴+左边          → show      → eileen  → happy smile at left",
-        "    生气+右边+淡入     → show      → eileen  → angry frown at right with dissolve",
-        "",
-        "  也就是说：属性、位置、特效都写在同一列，空格分隔即可，",
-        "  脚本会原样拼接到 show 语句后面。",
-        "",
-        "  ★ 如果不想用 LayeredImage（更简单的传统方式）：",
-        "  每个表情一个独立图片文件，用 show 的「图片/背景」列：",
-        "    show（显示角色） → 角色名：eileen",
-        "                     → 图片/背景：eileen_happy（图片名）",
-        "                     → 位置/特效/属性：at left",
-        "",
-        "  生成：show eileen eileen_happy at left",
+        "【注意事项】",
+        "  · 空行分隔场景区块、结束 if/menu 块",
+        "  · 图片路径相对 Ren'Py 的 game/ 目录",
+        "  · 函数调用（Transform/Solid）直接写，不加引号",
+        "  · 对话中引用变量用 [变量名]",
+        "  · menu_option 的跳转目标支持 jump/call/return/$",
     ]
-
     for row_idx, text in enumerate(help_lines, start=1):
         cell = ws_help.cell(row=row_idx, column=1, value=text)
         cell.font = Font(name="微软雅黑", size=10)
         if text.startswith("═══") or text.startswith("【"):
             cell.font = Font(name="微软雅黑", bold=True, size=11)
-        elif text.startswith("  ") and not text.startswith("    "):
-            pass  # 二级内容保持普通字号
     ws_help.column_dimensions["A"].width = 80
 
     _safe_save_workbook(wb, output_path, "模板")
@@ -433,27 +562,11 @@ def generate_blank_template(output_path: str):
     ws = wb.active
     ws.title = "script"
 
-    for col_idx, (header, width) in enumerate(HEADERS, start=1):
-        cell = ws.cell(row=1, column=col_idx, value=header)
-        cell.font = HEADER_FONT
-        cell.fill = HEADER_FILL
-        cell.alignment = HEADER_ALIGN
-        cell.border = THIN_BORDER
-        ws.column_dimensions[get_column_letter(col_idx)].width = width
+    scanned_characters, scanned_variables, scanned_images, scanned_files = scan_existing_scripts()
+    _setup_sheet_header_and_dropdowns(
+        ws, scanned_characters, scanned_variables, scanned_images, scanned_files
+    )
 
-    ws.row_dimensions[1].height = 24
-
-    from openpyxl.worksheet.datavalidation import DataValidation
-    cmd_formula = '"' + ",".join(COMMAND_TYPES) + '"'
-    dv = DataValidation(type="list", formula1=cmd_formula, allow_blank=True)
-    dv.error = "请从下拉列表选择指令类型"
-    dv.errorTitle = "无效指令"
-    dv.prompt = "请选择指令类型（括号内是中文说明）"
-    dv.promptTitle = "指令类型"
-    dv.add("B2:B10000")
-    ws.add_data_validation(dv)
-
-    ws.freeze_panes = "A2"
     _safe_save_workbook(wb, output_path, "空白模板")
 
 
@@ -492,7 +605,7 @@ def _try_copy_to_fallbacks(src_data: bytes, stem: str, ext: str, target_parent, 
             if dest_dir != target_parent:
                 print(f"\n⚠️  当前目录写入被拦截，已自动保存到{dir_label}：")
             else:
-                print(f"✅ {label}已生成：")
+                print(f"[OK] {label} saved:")
             print(f"   {dest}")
             return str(dest)
         except (PermissionError, OSError):
@@ -501,9 +614,9 @@ def _try_copy_to_fallbacks(src_data: bytes, stem: str, ext: str, target_parent, 
                 try:
                     alt.write_bytes(src_data)
                     if dest_dir != target_parent:
-                        print(f"\n⚠️  当前目录写入被拦截，已自动保存到{dir_label}：")
+                        print(f"\n[WARN] Can't write to target dir, saved to {dir_label}:")
                     else:
-                        print(f"✅ {label}已生成：")
+                        print(f"[OK] {label} saved:")
                     print(f"   {alt}")
                     return str(alt)
                 except (PermissionError, OSError):
@@ -524,15 +637,13 @@ def _safe_save_workbook(wb, output_path: str, label: str):
     stem = target.stem
     ext = target.suffix
 
-    # 用 BytesIO 获取字节，避免 openpyxl 自带的 temp+rename
     buffer = BytesIO()
     try:
         wb.save(buffer)
     except Exception:
-        # BytesIO 保存失败，回退到 wb.save 直接写路径
         try:
             wb.save(str(target))
-            print(f"✅ {label}已生成：")
+            print(f"[OK] {label} saved:")
             print(f"   {target}")
             return str(target)
         except (PermissionError, OSError):
@@ -541,12 +652,11 @@ def _safe_save_workbook(wb, output_path: str, label: str):
 
     data = buffer.getvalue()
 
-    # 尝试直接写入目标目录
     last_error = None
     for attempt in range(3):
         try:
             target.write_bytes(data)
-            print(f"✅ {label}已生成：")
+            print(f"[OK] {label} saved:")
             print(f"   {target}")
             return str(target)
         except (PermissionError, OSError) as e:
@@ -556,14 +666,12 @@ def _safe_save_workbook(wb, output_path: str, label: str):
                 time.sleep(0.3)
             continue
 
-    # 直接写入失败 → 尝试回退目录
     print(f"\n⚠️  无法写入目标目录：{target.parent}")
     print(f"   原因：{last_error}")
     result = _try_copy_to_fallbacks(data, stem, ext, target.parent, label)
     if result:
         return result
 
-    # 全部失败，留在临时目录
     import tempfile
     tmp_dir = _Path(tempfile.gettempdir())
     tmp_path = tmp_dir / f"{stem}{ext}"
@@ -585,7 +693,6 @@ def _safe_write_text(output_path: str, content: str):
     ext = target.suffix
     data = content.encode("utf-8")
 
-    # 尝试直接写入目标目录
     for attempt in range(3):
         try:
             target.write_bytes(data)
@@ -596,12 +703,10 @@ def _safe_write_text(output_path: str, content: str):
                 time.sleep(0.3)
             continue
 
-    # 直接写入失败 → 尝试回退目录
     result = _try_copy_to_fallbacks(data, stem, ext, target.parent, "文件")
     if result:
         return result
 
-    # 全部失败，留在临时目录
     import tempfile
     tmp_dir = _Path(tempfile.gettempdir())
     tmp_path = tmp_dir / f"{stem}{ext}"
@@ -630,6 +735,15 @@ def _escape_rpy(text: str) -> str:
 def _parse_cmd(raw: str) -> str:
     """从指令单元格中提取英文指令名（兼容 'jump（跳转）' 格式）"""
     return raw.split("（")[0].strip().lower()
+
+
+def _is_structured_variable_cmd(cmd: str) -> bool:
+    """判断是否为结构化变量类指令（定义/赋值/增减/开关/条件比较）"""
+    return cmd in (
+        "define_variable", "variable_set", "variable_change", "variable_toggle",
+        "variable_eq", "variable_ne", "variable_gt", "variable_ge",
+        "variable_lt", "variable_le",
+    )
 
 
 # ── 中文术语映射 ──────────────────────────────────────────
@@ -687,22 +801,38 @@ def check_excel(input_path: str) -> list:
     wb = load_workbook(input_path, data_only=True)
     issues = []
 
-    # 收集所有 label 名
     all_labels = set()
+    # 收集结构化变量名
+    all_variables = set()
+
+    valid_cmds = {
+        "label", "scene", "show", "hide", "dialogue", "narrator",
+        "menu", "menu_option", "jump", "call", "return",
+        "play_music", "stop_music", "queue_music", "play_sound", "stop_sound",
+        "voice", "pause", "player_input", "window",
+        "define_character", "define_variable", "define_image",
+        "variable_set", "variable_change", "variable_toggle",
+        "variable_eq", "variable_ne", "variable_gt", "variable_ge",
+        "variable_lt", "variable_le",
+        "$", "if", "elif", "else",
+        "default", "image",  # 向后兼容
+    }
 
     for sheet in wb.worksheets:
         rows = list(sheet.iter_rows(min_row=2, values_only=True))
         if not rows:
             continue
 
-        # 第一遍：收集 label 名
+        # 第一遍：收集 label 和变量名
         for row_idx, raw_row in enumerate(rows):
             row = [str(c).strip() if c is not None else "" for c in raw_row]
             if all(c == "" for c in row):
                 continue
-            cmd = _parse_cmd(_val(row, 1))
-            scene_label = _val(row, 0)
-            dialogue = _val(row, 4)
+            cmd = _parse_cmd(_val(row, COL_CMD))
+            scene_label = _val(row, COL_SCENE_LABEL)
+            dialogue = _val(row, COL_DIALOGUE)
+            variable = _val(row, COL_VARIABLE)
+
             if cmd == "label":
                 name = scene_label if scene_label else dialogue
                 if name and name in all_labels:
@@ -710,12 +840,16 @@ def check_excel(input_path: str) -> list:
                 elif name:
                     all_labels.add(name)
 
+            if _is_structured_variable_cmd(cmd) and variable:
+                all_variables.add(variable)
+
         # 第二遍：逐行检查
         in_menu = False
         menu_has_options = False
         in_if = False
         if_has_body = False
         last_role = ""
+        last_variable = ""
 
         for row_idx, raw_row in enumerate(rows):
             excel_row = row_idx + 2
@@ -731,30 +865,29 @@ def check_excel(input_path: str) -> list:
                 if_has_body = False
                 continue
 
-            raw_cmd = _val(row, 1)
+            raw_cmd = _val(row, COL_CMD)
             cmd = _parse_cmd(raw_cmd)
-            scene_label = _val(row, 0)
-            image_path = _val(row, 2)
-            character = _val(row, 3)
-            dialogue = _val(row, 4)
-            option_text = _val(row, 5)
-            jump_target = _val(row, 6)
-            audio = _val(row, 7)
-            effect = _val(row, 8)
+            scene_label = _val(row, COL_SCENE_LABEL)
+            image_path = _val(row, COL_IMAGE)
+            character = _val(row, COL_CHARACTER)
+            variable = _val(row, COL_VARIABLE)
+            dialogue = _val(row, COL_DIALOGUE)
+            option_text = _val(row, COL_OPTION)
+            jump_target = _val(row, COL_JUMP)
+            audio = _val(row, COL_AUDIO)
+            effect = _val(row, COL_EFFECT)
 
-            # 前向填充角色名
+            # 前向填充
             if character.strip():
                 last_role = character.strip()
             role = last_role
+            if variable.strip():
+                last_variable = variable.strip()
+            var_name = last_variable
 
             # 未知指令
-            if raw_cmd.strip() and cmd not in ("label", "scene", "show", "hide",
-                "dialogue", "narrator", "menu", "menu_option", "jump", "call",
-                "return", "$", "if", "elif", "else", "play_music", "stop_music",
-                "queue_music", "play_sound", "stop_sound", "voice", "pause",
-                "player_input", "window", "define_character", "default", "image"):
-                if raw_cmd.strip():
-                    issues.append((excel_row, "warn", f"未知指令类型：{raw_cmd}"))
+            if raw_cmd.strip() and cmd not in valid_cmds:
+                issues.append((excel_row, "warn", f"未知指令类型：{raw_cmd}"))
 
             # label 无名称
             if cmd == "label":
@@ -779,10 +912,41 @@ def check_excel(input_path: str) -> list:
                 if not dialogue:
                     issues.append((excel_row, "warn", "dialogue 没有对话文本"))
 
-            # narrator 无文本
             if cmd == "narrator":
                 if not dialogue:
                     issues.append((excel_row, "warn", "narrator 没有文本"))
+
+            # 结构化变量检查
+            if cmd == "define_variable":
+                if not var_name:
+                    issues.append((excel_row, "warn", "变量定义缺少变量名"))
+                if not dialogue:
+                    issues.append((excel_row, "warn", "变量定义缺少初始值"))
+
+            if cmd == "variable_set":
+                if not var_name:
+                    issues.append((excel_row, "warn", "变量赋值缺少变量名"))
+                if not dialogue:
+                    issues.append((excel_row, "warn", "变量赋值缺少值"))
+
+            if cmd == "variable_change":
+                if not var_name:
+                    issues.append((excel_row, "warn", "变量增减缺少变量名"))
+                if not dialogue:
+                    issues.append((excel_row, "warn", "变量增减缺少增量值"))
+
+            if cmd == "variable_toggle":
+                if not var_name:
+                    issues.append((excel_row, "warn", "变量开关缺少变量名"))
+                if dialogue.lower() not in ("true", "false"):
+                    issues.append((excel_row, "warn", "变量开关值应为 true 或 false"))
+
+            # 结构化条件检查
+            if cmd in VARIABLE_OP_MAP:
+                if not var_name:
+                    issues.append((excel_row, "warn", f"{cmd} 缺少变量名"))
+                if not dialogue:
+                    issues.append((excel_row, "warn", f"{cmd} 缺少比较值"))
 
             # menu 检测
             if cmd == "menu":
@@ -803,28 +967,22 @@ def check_excel(input_path: str) -> list:
                 if not jump_target:
                     issues.append((excel_row, "warn", "menu_option 没有跳转目标"))
 
-            # 非 menu_option 结束 menu
             if cmd not in ("menu", "menu_option") and in_menu:
                 if not menu_has_options:
                     issues.append((menu_start_row, "error", "菜单没有任何选项"))
                 in_menu = False
                 menu_has_options = False
 
-            # if/elif/else 检测
-            if cmd == "if" or cmd == "elif":
+            # if/elif/else 检测（传统条件 和 结构化条件）
+            is_condition = cmd in VARIABLE_OP_MAP or cmd in ("if", "elif", "else")
+            if is_condition:
                 if in_if and not if_has_body:
                     issues.append((if_start_row, "error", "if 块没有后续指令"))
                 in_if = True
                 if_has_body = False
                 if_start_row = excel_row
-                if not dialogue:
+                if cmd in ("if", "elif") and not dialogue:
                     issues.append((excel_row, "warn", "if/elif 没有条件表达式"))
-            elif cmd == "else":
-                if in_if and not if_has_body:
-                    issues.append((if_start_row, "error", "if 块没有后续指令"))
-                in_if = True
-                if_has_body = False
-                if_start_row = excel_row
             elif in_if:
                 if_has_body = True
 
@@ -844,8 +1002,6 @@ def check_excel(input_path: str) -> list:
             if cmd == "player_input":
                 if not character:
                     issues.append((excel_row, "warn", "player_input 没有变量名"))
-                if not dialogue:
-                    issues.append((excel_row, "warn", "player_input 没有提示文字"))
 
     return issues
 
@@ -874,16 +1030,18 @@ def convert_excel_to_rpy(input_path: str, output_path: str):
     """将 Excel 转为 .rpy 脚本（支持多 Sheet）"""
     wb = load_workbook(input_path, data_only=True)
 
-    warnings = []  # (sheet_name, row_num, message)
+    warnings = []
 
     def _warn(msg: str, row_num: int = 0):
         sheet_name = wb.active.title if wb.active else "?"
         warnings.append(f"[{sheet_name} 行{row_num + 1}] {msg}")
 
-    all_sheet_lines = []  # [(label, lines, header_lines)]
-    all_header_lines = []  # define/image at top level
+    all_sheet_lines = []
+    all_header_lines = []
     defined_characters = set()
-    role_registry = set()  # 自动收集的角色名
+    role_registry = set()
+    # 变量注册表（自动收集）
+    variable_registry = set()
 
     for sheet in wb.worksheets:
         rows = list(sheet.iter_rows(min_row=2, values_only=True))
@@ -896,10 +1054,10 @@ def convert_excel_to_rpy(input_path: str, output_path: str):
         in_if_body = False
         base_indent = "    "
 
-        # 状态追踪
-        current_role = ""       # 前向填充的角色名
-        current_characters = []  # 当前在场立绘缓存: [(name, alias)]
-        scene_sheet_label = ""   # 首个 label 名
+        current_role = ""
+        current_variable = ""
+        current_characters = []
+        scene_sheet_label = ""
 
         def _indent():
             return base_indent + ("    " if in_if_body else "")
@@ -911,64 +1069,60 @@ def convert_excel_to_rpy(input_path: str, output_path: str):
         for row_idx, raw_row in enumerate(rows):
             row = [str(c).strip() if c is not None else "" for c in raw_row]
 
-            # 跳过完全空行
             if all(c == "" for c in row):
                 if in_menu:
                     in_menu = False
                 _end_if_body()
                 continue
 
-            scene_label = _val(row, 0)
-            raw_cmd = _val(row, 1)
+            scene_label = _val(row, COL_SCENE_LABEL)
+            raw_cmd = _val(row, COL_CMD)
             cmd = _parse_cmd(raw_cmd)
-            image_path = _val(row, 2)
-            character = _val(row, 3)
-            dialogue = _val(row, 4)
-            option_text = _val(row, 5)
-            jump_target = _val(row, 6)
-            audio = _val(row, 7)
-            effect = _translate_effect(_val(row, 8))
-            notes = _val(row, 9)
+            image_path = _val(row, COL_IMAGE)
+            character = _val(row, COL_CHARACTER)
+            variable = _val(row, COL_VARIABLE)
+            dialogue = _val(row, COL_DIALOGUE)
+            option_text = _val(row, COL_OPTION)
+            jump_target = _val(row, COL_JUMP)
+            audio = _val(row, COL_AUDIO)
+            effect = _translate_effect(_val(row, COL_EFFECT))
+            notes = _val(row, COL_NOTES)
 
-            # ── 角色名前向填充 & 修剪 ──
+            # 向后兼容旧指令
+            if cmd in OLD_CMD_ALIASES:
+                cmd = OLD_CMD_ALIASES[cmd]
+
+            # 角色名前向填充
             if character.strip():
                 trimmed = _trim_role_name(character)
                 if trimmed != character and character.strip():
                     _warn(f"角色名首尾含空白，已修剪：'{character}' → '{trimmed}'", row_idx)
                 current_role = trimmed
-            role = current_role  # 当前行生效的角色名
+            role = current_role
 
-            # ── 旁白自动检测 ──
+            # 变量名前向填充
+            if variable.strip():
+                current_variable = variable.strip()
+            var_name = current_variable
+
+            # 旁白自动检测
             if role == "旁白":
                 role = "narrator"
 
-            # ── 空指令 + 有角色名 → 自动推断为 dialogue ──
+            # 空指令 + 有角色名 → 自动推断为 dialogue
             if not raw_cmd.strip() and role and role != "narrator":
                 cmd = "dialogue"
-            # ── 空指令 + 有对话文本 + 无角色 → 旁白 ──
+            # 空指令 + 有对话文本 + 无角色 → 旁白
             if not raw_cmd.strip() and dialogue and not role:
                 cmd = "narrator"
 
-            # ── 立绘缓存自动回收（可选） ──
-            # 取消注释以下代码启用 auto-hide：
-            # if cmd == "show":
-            #     show_name = character if character else image_path
-            #     for cached_name, cached_alias in current_characters:
-            #         if cached_name != show_name:
-            #             lines.append(f"{_indent()}hide {cached_name}" + (f" as {cached_alias}" if cached_alias else ""))
-            #     current_characters = [(show_name, "")]
-            #     if image_path and effect and " as " in effect:
-            #         parts = effect.split(" as ", 1)
-            #         alias = parts[1].split()[0] if len(parts) > 1 else ""
-            #         if alias:
-            #             current_characters = [(show_name, alias)]
-            # elif cmd == "hide":
-            #     hide_name = character if character else image_path
-            #     current_characters = [(n, a) for n, a in current_characters if n != hide_name]
-            # elif cmd == "scene":
-            #     current_characters = []
+            # ── 记录角色和变量 ──
+            if role and role != "narrator":
+                role_registry.add(role)
+            if _is_structured_variable_cmd(cmd) and var_name:
+                variable_registry.add(var_name)
 
-            # ── define_character / default / image（提前收集到文件头）──
+            # ── define_character ──
             if cmd == "define_character":
                 name = character if character else "unknown"
                 defined_characters.add(name)
@@ -979,14 +1133,16 @@ def convert_excel_to_rpy(input_path: str, output_path: str):
                 header_lines.append(line)
                 continue
 
-            if cmd == "default":
-                name = character if character else "unknown"
+            # ── define_variable ──
+            if cmd == "define_variable":
+                name = var_name if var_name else "unknown"
                 val = dialogue if dialogue else '""'
                 header_lines.append(f"default {name} = {val}")
                 continue
 
-            if cmd == "image":
-                img_name = character if character else "unknown"
+            # ── define_image ──
+            if cmd == "define_image":
+                img_name = var_name if var_name else "unknown"
                 img_path = image_path if image_path else ""
                 if "(" in img_path:
                     header_lines.append(f'image {img_name} = {img_path}')
@@ -1081,7 +1237,6 @@ def convert_excel_to_rpy(input_path: str, output_path: str):
                     lines.append(f"{_indent()}        pass")
                 continue
 
-            # 非 menu_option 且在 menu 中 → 结束 menu
             if cmd != "menu_option" and in_menu:
                 in_menu = False
 
@@ -1104,7 +1259,47 @@ def convert_excel_to_rpy(input_path: str, output_path: str):
                 lines.append(f"{_indent()}return")
                 continue
 
-            # ── $（设置变量）──
+            # ── variable_set（结构化变量赋值）──
+            if cmd == "variable_set":
+                name = var_name if var_name else ""
+                val = dialogue if dialogue else ""
+                if name and val:
+                    lines.append(f"{_indent()}$ {name} = {val}")
+                continue
+
+            # ── variable_change（结构化变量增减）──
+            if cmd == "variable_change":
+                name = var_name if var_name else ""
+                delta = dialogue if dialogue else "0"
+                if name:
+                    if delta.startswith("-"):
+                        lines.append(f"{_indent()}$ {name} -= {delta[1:]}")
+                    elif delta.startswith("+"):
+                        lines.append(f"{_indent()}$ {name} += {delta[1:]}")
+                    else:
+                        lines.append(f"{_indent()}$ {name} += {delta}")
+                continue
+
+            # ── variable_toggle（结构化变量开关）──
+            if cmd == "variable_toggle":
+                name = var_name if var_name else ""
+                val = dialogue.strip().lower() if dialogue else "true"
+                if name:
+                    val_bool = "True" if val == "true" else "False"
+                    lines.append(f"{_indent()}$ {name} = {val_bool}")
+                continue
+
+            # ── 结构化条件判断 ──
+            if cmd in VARIABLE_OP_MAP:
+                _end_if_body()
+                name = var_name if var_name else ""
+                val = dialogue if dialogue else "0"
+                op = VARIABLE_OP_MAP[cmd]
+                lines.append(f"{_indent()}if {name} {op} {val}:")
+                in_if_body = True
+                continue
+
+            # ── $（通用设置变量）──
             if cmd == "$":
                 code = dialogue if dialogue else ""
                 if code:
@@ -1174,7 +1369,7 @@ def convert_excel_to_rpy(input_path: str, output_path: str):
 
             # ── window ──
             if cmd == "window":
-                action = dialogue.lower() if dialogue else "show"
+                action = _escape_rpy(dialogue) if dialogue else "show"
                 if action in ("show", "hide", "auto"):
                     lines.append(f"{_indent()}window {action}")
                 else:
@@ -1193,30 +1388,23 @@ def convert_excel_to_rpy(input_path: str, output_path: str):
 
             # ── player_input（玩家输入）──
             if cmd == "player_input":
-                var_name = character if character else "input_result"
+                var_name_input = character if character else "input_result"
                 prompt = dialogue if dialogue else "请输入："
                 default_val = effect if effect else ""
                 prompt_escaped = _escape_rpy(prompt)
                 if default_val:
-                    lines.append(f'{_indent()}$ {var_name} = renpy.input("{prompt_escaped}").strip() or "{_escape_rpy(default_val)}"')
+                    lines.append(f'{_indent()}$ {var_name_input} = renpy.input("{prompt_escaped}").strip() or "{_escape_rpy(default_val)}"')
                 else:
-                    lines.append(f'{_indent()}$ {var_name} = renpy.input("{prompt_escaped}").strip()')
+                    lines.append(f'{_indent()}$ {var_name_input} = renpy.input("{prompt_escaped}").strip()')
                 continue
 
-            # 未知指令 → 跳过
-
-            # ── 记录使用中的角色名 ──
-            if role and role != "narrator":
-                role_registry.add(role)
-            # show 指令中的图片名也注册
+            # show 指令中的图片名注册
             if cmd == "show" and image_path:
                 img_name = image_path.split()[0] if image_path else ""
                 if img_name and not img_name.startswith("bg "):
                     role_registry.add(img_name)
 
-        # ── 每 Sheet 处理完毕 ──
-        sheet_label = scene_sheet_label or sheet.title
-        all_sheet_lines.append((sheet_label, lines, header_lines))
+        all_sheet_lines.append((scene_sheet_label or sheet.title, lines, header_lines))
 
     # ── 自动生成未定义的 Character ──
     auto_defines = role_registry - defined_characters - {"narrator", ""}
@@ -1224,7 +1412,6 @@ def convert_excel_to_rpy(input_path: str, output_path: str):
         all_header_lines.insert(0, f'define {name} = Character("{name}")')
 
     # ── 组装输出 ──
-    # 首个 sheet 的 header_lines 作为全局 header
     first_sheet_headers = all_sheet_lines[0][2] if all_sheet_lines else []
     output_parts = ["# Generated by excel_to_rpy.py",
                     "# 源文件: " + os.path.basename(input_path),
@@ -1240,7 +1427,6 @@ def convert_excel_to_rpy(input_path: str, output_path: str):
             first = False
         else:
             output_parts.append("")
-            # 只在 Sheet 没有自带 label 时才加
             has_label = any(l.strip().startswith("label ") for l in lines)
             if not has_label:
                 output_parts.append(f"label {label}:")
@@ -1253,13 +1439,11 @@ def convert_excel_to_rpy(input_path: str, output_path: str):
     print(f"Complete: {saved_path}")
     print(f"   {total_lines} lines / {len(all_sheet_lines)} sheet(s)")
 
-    # ── 警告汇总 ──
     if warnings:
         print(f"\n[WARN] {len(warnings)} issue(s):")
         for w in warnings:
             print(f"  {w}")
 
-    # ── 自动注册的角色 ──
     if auto_defines:
         print(f"\n[INFO] Auto-defined {len(auto_defines)} character(s):")
         for n in sorted(auto_defines):

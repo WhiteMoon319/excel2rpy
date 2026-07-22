@@ -2,6 +2,8 @@
 
 双向转换 Ren'Py 脚本 (`.rpy`) 和 Excel 表格 (`.xlsx`)，方便用表格批量编辑对话、场景、分支等。
 
+编剧只需填表 + 下拉选择，无需写任何 Python 语法即可完成变量管理和图片引用。
+
 ## 文件
 
 ```
@@ -22,15 +24,18 @@ pip install openpyxl
 
 | 脚本 | 做什么 |
 |------|--------|
-| `excel_to_rpy.py` | 1. 转换 / 2. 校验 / 3. 教学模板 / 4. 空白模板 |
+| `excel_to_rpy.py` | 1. 转换 / 2. 校验 / 3. 教学模板（含示例）/ 4. 空白模板 |
 | `rpy_to_excel.py` | 1. 转换 .rpy 为 Excel |
 | `test_roundtrip.py` | 1. 测试自带样本 / 2. 测试游戏脚本 / 3. 测试其他 |
 
 命令行也支持：
 
 ```bash
-# 生成模板
+# 生成教学模板（含示例和说明）
 python excel_to_rpy.py --template
+
+# 生成空白模板（仅表头+下拉）
+python excel_to_rpy.py --blank
 
 # Excel -> .rpy（自动先校验）
 python excel_to_rpy.py script.xlsx -o output.rpy
@@ -45,26 +50,78 @@ python rpy_to_excel.py script.rpy -o output.xlsx
 python test_roundtrip.py test.rpy
 ```
 
-## Excel 表格格式
+## Excel 表格格式（11 列）
 
 | 列 | 说明 | 示例 |
 |----|------|------|
-| 场景标签 | `label` 的名称 | `start` |
-| 指令类型 | 下拉选择（中文标注）/ 留空自动推断 | `dialogue（角色对话）` |
-| 图片/背景 | 图片路径或函数调用 | `images/bg.jpg` |
-| 角色名 | 说话的角色 / 留空沿用上一行 | `eileen` |
-| 对话文本 | 对话内容或 Python 代码 | `你好！` |
-| 选项文本 | 菜单选项文字 | `去图书馆` |
-| 跳转目标 | `jump`/`call` 的目标 / 也支持 `return`、`$` | `library` |
-| 音频路径 | BGM、音效、配音文件路径 | `audio/bgm.ogg` |
-| 位置/特效/属性 | 支持中文 `溶解`→`dissolve`，`左边`→`left` | `at center with fade` |
-| 备注 | 额外说明 | `centered` |
+| A 场景标签 | `label` 的名称 | `start` |
+| B 指令类型 | 下拉选择（中文标注）/ 留空自动推断 | `dialogue（角色对话）` |
+| C 图片/背景 | 图片路径或函数调用 | `images/bg_room.jpg` |
+| D 角色名 | 说话的角色（dialogue/show/hide/角色定义） | `主角` |
+| E 变量名 | 变量名（变量定义/赋值/增减/开关/条件比较） | `score` |
+| F 对话文本 | 对话内容或数值 | `你好！` |
+| G 选项文本 | 菜单选项文字 | `去图书馆` |
+| H 跳转目标 | `jump`/`call` 的目标 / `return`、`$` | `library` |
+| I 音频路径 | BGM、音效、配音文件路径 | `audio/bgm.ogg` |
+| J 位置/特效/属性 | 中文位置和转场 | `溶解`、`左边` |
+| K 备注 | 额外说明 | `centered` |
+
+## 结构化指令类型
+
+### 定义类
+
+| 指令类型 | 填写方式 | 生成代码 |
+|----------|----------|----------|
+| `角色定义（定义角色）` | D列=角色名, F列=Character(...) | `define name = Character(...)` |
+| `变量定义（定义变量）` | E列=变量名, F列=初始值 | `default name = value` |
+| `图片定义（定义图片）` | C列=路径, E列=标识名 | `image name = "path"` |
+
+### 操作类
+
+| 指令类型 | 填写方式 | 生成代码 |
+|----------|----------|----------|
+| `变量赋值（变量赋值）` | E列=变量名, F列=新值 | `$ name = value` |
+| `变量增减（变量增减）` | E列=变量名, F列=增量（如1或-3） | `$ name += 1` / `$ name -= 3` |
+| `变量开关（变量开关）` | E列=变量名, F列=下拉选true/false | `$ name = True` / `$ name = False` |
+
+### 条件类（结构化）
+
+| 指令类型 | 填写方式 | 生成代码 |
+|----------|----------|----------|
+| `变量=（等于）` | E列=变量名, F列=比较值 | `if name == value:` |
+| `变量≠（不等于）` | E列=变量名, F列=比较值 | `if name != value:` |
+| `变量>（大于）` | E列=变量名, F列=比较值 | `if name > value:` |
+| `变量≥（大于等于）` | E列=变量名, F列=比较值 | `if name >= value:` |
+| `变量<（小于）` | E列=变量名, F列=比较值 | `if name < value:` |
+| `变量≤（小于等于）` | E列=变量名, F列=比较值 | `if name <= value:` |
+| `else（否则）` | 无需额外填写 | `else:` |
+
+> 复杂条件仍可使用传统的 `if（条件判断）` / `elif（否则如果）`，在 F 列写完整 Python 表达式。
+
+### 保留的传统指令
+
+`dialogue`、`scene`、`show`、`hide`、`menu`、`menu_option`、`jump`、`call`、`return`、
+`play_music`、`stop_music`、`queue_music`、`play_sound`、`stop_sound`、
+`voice`、`pause`、`player_input`、`window`、`$（设置变量）`、`if（条件判断）`、`elif（否则如果）`
+
+## 下拉菜单
+
+| 列 | 下拉数据来源 |
+|----|-------------|
+| B 指令类型 | 固定下拉列表（所有支持的指令） |
+| C 图片/背景 | 扫描 `game/*.rpy` 中的 `image` 定义名 + `game/` 下所有图片文件 |
+| D 角色名 | 扫描 `game/*.rpy` 中的 `define` 角色 + 表中定义的角色 |
+| E 变量名 | 扫描 `game/*.rpy` 中的 `default` 变量 + 表中定义的变量 |
+| F 对话文本 | 当指令=变量开关时，固定 `true` / `false` 下拉 |
+
+> 每次生成模板时自动扫描当前 `game/` 目录，生成对应的下拉列表。
 
 ## 特色功能
 
 ### 智能填充
 
-- **角色名前向填充**：角色名列留空自动沿用上一行，不用每行重复填
+- **角色名前向填充**：角色名列留空自动沿用上一行
+- **变量名前向填充**：变量名列留空自动沿用上一行
 - **指令自动推断**：有角色名 + 空指令 → 自动当对话；有文本 + 无角色 → 自动当旁白
 - **旁白快捷**：角色名写 `旁白` 自动切换 narrator
 
@@ -75,7 +132,7 @@ python test_roundtrip.py test.rpy
 ```
 溶解→dissolve  褪色→fade  闪白→Fade(0.1,0,0.5)
 左边→left     右边→right  中间→center
-像素化→pixellate  振屏→hpunch
+像素化→pixellate  横向振动→hpunch  纵向振动→vpunch
 ```
 
 ### 表格校验
@@ -85,9 +142,7 @@ python test_roundtrip.py test.rpy
 | 严重度 | 检查项 |
 |--------|--------|
 | ERROR | label 无名称、menu 无选项、menu_option 位置错误、重复标签 |
-| WARN | 跳转目标未定义、缺角色名/对话文本、show 无图片、音频路径缺失 |
-
-校验通过命令行 `--check` 可独立运行，转换时也会自动执行，有错误会询问是否继续。
+| WARN | 跳转目标未定义、缺角色名/对话文本、show 无图片、变量开关值非 true/false、变量定义/赋值缺少值 |
 
 ### 角色自动注册
 
@@ -95,7 +150,7 @@ python test_roundtrip.py test.rpy
 
 ### 多 Sheet 支持
 
-每个 Sheet 视为一个独立场景。首个 Sheet 为 `start`，其他 Sheet 以标签名或 Sheet 名为入口。
+每个 Sheet 视为一个独立场景。首个 Sheet 定义为 `start`，其他 Sheet 以标签名或 Sheet 名为入口。
 
 ## 双向转换（Roundtrip）
 
@@ -103,12 +158,12 @@ python test_roundtrip.py test.rpy
 .rpy  ──rpy_to_excel──>  .xlsx  ──excel_to_rpy──>  .rpy
 ```
 
-经过回归测试验证，`.rpy` → Excel → `.rpy` 的输出与原始脚本内容完全一致。
+反向转换自动识别结构化指令（`variable_set`、`variable_change`、`variable_toggle`、`variable_eq` 等），保证双向转换不失真。
 
 ## 注意事项
 
 - 图片路径可用双引号包裹（`"images/bg.jpg"`），函数调用（`Transform(...)`）直接写
 - 空行用于分隔场景、结束 `if` / `menu` 块
-- `python:` 多行代码块会拆分为独立 `$` 语句和 `if` 块，功能等价
+- `python:` 多行代码块会拆分为独立语句和 `if` 块，功能等价
 - 双击运行时若 CWD 异常（如 `C:\Windows\System32`），脚本自动切换到自身目录
-- 拖错文件类型（.xlsx 拖给 rpy_to_excel）会友好提示
+- 结构化条件 `变量=`、`变量≥` 等只在条件为简单 `if var OP val` 时有效；复杂条件请用传统 `if`

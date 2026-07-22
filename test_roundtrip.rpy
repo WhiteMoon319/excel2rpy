@@ -1,7 +1,11 @@
 define narrator = Character("")
 define tester = Character("测试员")
+define 同学A = Character("同学A")
 default score = 0
 default has_key = False
+default money = 100
+default health = 50
+default love = 0
 
 image bg room = "images/bg_room.jpg"
 image bg park = "images/bg_park.jpg"
@@ -95,5 +99,42 @@ label player_input_test:
     if player_name == "":
         $ player_name = "无名"
     tester "你好，[player_name]！"
+
+    return
+
+label structured_variable_test:
+
+    "———— 结构化变量指令测试 ————"
+
+    $ money = 200
+    $ score += 1
+    $ health -= 5
+    $ has_key = True
+    $ has_key = False
+    $ love = 10
+
+    if score == 20:
+        "分数正好 20。"
+    else:
+        "分数不是 20。"
+
+    if score != 0:
+        "分数不为 0。"
+
+    if score > 15:
+        "分数大于 15。"
+
+    if score >= 11:
+        "分数大于等于 11。"
+
+    if health < 50:
+        "生命值小于 50。"
+
+    if health <= 45:
+        "生命值小于等于 45。"
+
+    if money >= 100 and love >= 5:
+        "复杂条件仍用传统 if。"
+        return
 
     return
