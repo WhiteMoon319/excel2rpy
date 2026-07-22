@@ -50,7 +50,7 @@ python rpy_to_excel.py script.rpy -o output.xlsx
 python test_roundtrip.py test.rpy
 ```
 
-## Excel 表格格式（11 列）
+## Excel 表格格式（12 列）
 
 | 列 | 说明 | 示例 |
 |----|------|------|
@@ -59,12 +59,13 @@ python test_roundtrip.py test.rpy
 | C 图片/背景 | 图片路径或函数调用 | `images/bg_room.jpg` |
 | D 角色名 | 说话的角色（dialogue/show/hide/角色定义） | `主角` |
 | E 变量名 | 变量名（变量定义/赋值/增减/开关/条件比较） | `score` |
-| F 对话文本 | 对话内容或数值 | `你好！` |
-| G 选项文本 | 菜单选项文字 | `去图书馆` |
-| H 跳转目标 | `jump`/`call` 的目标 / `return`、`$` | `library` |
-| I 音频路径 | BGM、音效、配音文件路径 | `audio/bgm.ogg` |
-| J 位置/特效/属性 | 中文位置和转场 | `溶解`、`左边` |
-| K 备注 | 额外说明 | `centered` |
+| F 逻辑连接 | 复合条件的连接符，下拉 `and` / `or` / 空 | `and` |
+| G 对话文本 | 对话内容或数值 | `你好！` |
+| H 选项文本 | 菜单选项文字 | `去图书馆` |
+| I 跳转目标 | `jump`/`call` 的目标 / `return`、`$` | `library` |
+| J 音频路径 | BGM、音效、配音文件路径 | `audio/bgm.ogg` |
+| K 位置/特效/属性 | 中文位置和转场 | `溶解`、`左边` |
+| L 备注 | 额外说明 | `centered` |
 
 ## 结构化指令类型
 
@@ -72,37 +73,51 @@ python test_roundtrip.py test.rpy
 
 | 指令类型 | 填写方式 | 生成代码 |
 |----------|----------|----------|
-| `角色定义（定义角色）` | D列=角色名, F列=Character(...) | `define name = Character(...)` |
-| `变量定义（定义变量）` | E列=变量名, F列=初始值 | `default name = value` |
+| `角色定义（定义角色）` | D列=角色名, G列=Character(...) | `define name = Character(...)` |
+| `变量定义（定义变量）` | E列=变量名, G列=初始值 | `default name = value` |
 | `图片定义（定义图片）` | C列=路径, E列=标识名 | `image name = "path"` |
 
 ### 操作类
 
 | 指令类型 | 填写方式 | 生成代码 |
 |----------|----------|----------|
-| `变量赋值（变量赋值）` | E列=变量名, F列=新值 | `$ name = value` |
-| `变量增减（变量增减）` | E列=变量名, F列=增量（如1或-3） | `$ name += 1` / `$ name -= 3` |
-| `变量开关（变量开关）` | E列=变量名, F列=下拉选true/false | `$ name = True` / `$ name = False` |
+| `变量赋值（变量赋值）` | E列=变量名, G列=新值 | `$ name = value` |
+| `变量增减（变量增减）` | E列=变量名, G列=增量（如1或-3） | `$ name += 1` / `$ name -= 3` |
+| `变量开关（变量开关）` | E列=变量名, G列=下拉选true/false | `$ name = True` / `$ name = False` |
 
 ### 条件类（结构化）
 
 | 指令类型 | 填写方式 | 生成代码 |
 |----------|----------|----------|
-| `变量=（等于）` | E列=变量名, F列=比较值 | `if name == value:` |
-| `变量≠（不等于）` | E列=变量名, F列=比较值 | `if name != value:` |
-| `变量>（大于）` | E列=变量名, F列=比较值 | `if name > value:` |
-| `变量≥（大于等于）` | E列=变量名, F列=比较值 | `if name >= value:` |
-| `变量<（小于）` | E列=变量名, F列=比较值 | `if name < value:` |
-| `变量≤（小于等于）` | E列=变量名, F列=比较值 | `if name <= value:` |
+| `变量=（等于）` | E列=变量名, F列=and/or/空, G列=比较值 | `if name == value:` |
+| `变量≠（不等于）` | E列=变量名, F列=and/or/空, G列=比较值 | `if name != value:` |
+| `变量>（大于）` | E列=变量名, F列=and/or/空, G列=比较值 | `if name > value:` |
+| `变量≥（大于等于）` | E列=变量名, F列=and/or/空, G列=比较值 | `if name >= value:` |
+| `变量<（小于）` | E列=变量名, F列=and/or/空, G列=比较值 | `if name < value:` |
+| `变量≤（小于等于）` | E列=变量名, F列=and/or/空, G列=比较值 | `if name <= value:` |
 | `else（否则）` | 无需额外填写 | `else:` |
 
-> 复杂条件仍可使用传统的 `if（条件判断）` / `elif（否则如果）`，在 F 列写完整 Python 表达式。
+**复合条件**：F 列（逻辑连接）用于串联多个结构化条件。
+
+```
+第1行: 变量≥ | score | and | 10      → if score >= 10
+第2行: 变量< | score |     | 50      → and score < 50:
+```
+→ 生成 `if score >= 10 and score < 50:`
+
+- **F 列非空** → 该行是复合条件的一部分，继续拼接
+- **F 列为空** → 结束条件链，加冒号换行
+- **F 列始终为空** → 独立单条件
+
+> 复杂条件仍可使用传统的 `if（条件判断）` / `elif（否则如果）`，在 G 列写完整 Python 表达式。
 
 ### 保留的传统指令
 
 `dialogue`、`scene`、`show`、`hide`、`menu`、`menu_option`、`jump`、`call`、`return`、
 `play_music`、`stop_music`、`queue_music`、`play_sound`、`stop_sound`、
 `voice`、`pause`、`player_input`、`window`、`$（设置变量）`、`if（条件判断）`、`elif（否则如果）`
+
+使用传统指令时，`$` / `if` / `elif` 的代码填在 G 列（对话文本）。
 
 ## 下拉菜单
 
@@ -112,7 +127,8 @@ python test_roundtrip.py test.rpy
 | C 图片/背景 | 扫描 `game/*.rpy` 中的 `image` 定义名 + `game/` 下所有图片文件 |
 | D 角色名 | 扫描 `game/*.rpy` 中的 `define` 角色 + 表中定义的角色 |
 | E 变量名 | 扫描 `game/*.rpy` 中的 `default` 变量 + 表中定义的变量 |
-| F 对话文本 | 当指令=变量开关时，固定 `true` / `false` 下拉 |
+| F 逻辑连接 | 固定 `and` / `or` 下拉（用于复合条件串联） |
+| G 对话文本 | 当指令=变量开关时，固定 `true` / `false` 下拉 |
 
 > 每次生成模板时自动扫描当前 `game/` 目录，生成对应的下拉列表。
 
