@@ -216,7 +216,7 @@ def scan_existing_scripts(game_dir: str = None):
     defined_paths.update(image_defs.keys())
 
     gui_dirs = {"gui", "GUI"}
-    prefix = game_dir + "/"
+    prefix = str(game_path).replace("\\", "/") + "/"
     for ext in image_extensions:
         for img_file in game_path.glob(f"**/*{ext}"):
             rel = str(img_file).replace("\\", "/")
@@ -880,6 +880,8 @@ def check_excel(input_path: str) -> list:
     }
 
     for sheet in wb.worksheets:
+        if sheet.sheet_state == "hidden" or sheet.title.startswith("_dd"):
+            continue
         rows = list(sheet.iter_rows(min_row=2, values_only=True))
         if not rows:
             continue
@@ -1108,6 +1110,8 @@ def convert_excel_to_rpy(input_path: str, output_path: str):
     variable_registry = set()
 
     for sheet in wb.worksheets:
+        if sheet.sheet_state == "hidden" or sheet.title.startswith("_dd"):
+            continue
         rows = list(sheet.iter_rows(min_row=2, values_only=True))
         if not rows:
             continue
@@ -1548,6 +1552,702 @@ def convert_excel_to_rpy(input_path: str, output_path: str):
         for n in sorted(auto_defines):
             print(f"  define {n} = Character(\"{n}\")")
 
+    # ── 自动追加定义到 defines.rpy ──
+    try:
+        append_defines_from_excel(input_path)
+    except Exception as e:
+        print(f"[INFO] 定义追加跳过: {e}")
+
+
+# ── 定义管理模块 ──────────────────────────────────────────
+
+def _find_defines_rpy():
+    """查找 defines.rpy 路径（位于 game/ 目录下）。返回 Path 或 None。"""
+    root = _find_project_root()
+    game_path = root / "game"
+    if game_path.is_dir():
+        return game_path / "defines.rpy"
+    return None
+
+
+def _find_game_dir():
+    """查找 game/ 目录。返回 Path 或 None。"""
+    root = _find_project_root()
+    game_path = root / "game"
+    return game_path if game_path.is_dir() else None
+
+
+def scan_excel_for_defines(excel_path):
+    """从 Excel 中提取所有 define_character / define_variable / define_image 定义。
+
+    返回: [{type, name, line, source}, ...]
+      type: "character" | "variable" | "image"
+    """
+    from pathlib import Path as _Path
+
+    if not os.path.isfile(excel_path):
+        return []
+
+    try:
+        wb = load_workbook(excel_path, data_only=True)
+    except Exception:
+        return []
+
+    defines = []
+    source_label = f"excel:{_Path(excel_path).name}"
+
+    for sheet in wb.worksheets:
+        if sheet.sheet_state == "hidden" or sheet.title.startswith("_dd"):
+            continue
+        rows = list(sheet.iter_rows(min_row=2, values_only=True))
+        if not rows:
+            continue
+
+        current_role = ""
+        current_variable = ""
+
+        for raw_row in rows:
+            row_data = [str(c).strip() if c is not None else "" for c in raw_row]
+            if all(c == "" for c in row_data):
+                current_role = ""
+                current_variable = ""
+                continue
+
+            raw_cmd = _val(row_data, COL_CMD)
+            cmd = _parse_cmd(raw_cmd)
+            image_path = _val(row_data, COL_IMAGE)
+            character = _val(row_data, COL_CHARACTER)
+            variable = _val(row_data, COL_VARIABLE)
+            dialogue = _val(row_data, COL_DIALOGUE)
+
+            if cmd in OLD_CMD_ALIASES:
+                cmd = OLD_CMD_ALIASES[cmd]
+
+            if character.strip():
+                current_role = character.strip()
+            if variable.strip():
+                current_variable = variable.strip()
+
+            if cmd == "define_character":
+                name = current_role if current_role else "unknown"
+                if dialogue:
+                    line = f"define {name} = {dialogue}"
+                else:
+                    line = f'define {name} = Character("{name}")'
+                defines.append({
+                    "type": "character",
+                    "name": name,
+                    "line": line,
+                    "source": source_label,
+                })
+
+            elif cmd == "define_variable":
+                name = current_variable if current_variable else "unknown"
+                val = dialogue if dialogue else '""'
+                defines.append({
+                    "type": "variable",
+                    "name": name,
+                    "line": f"default {name} = {val}",
+                    "source": source_label,
+                })
+
+            elif cmd == "define_image":
+                img_name = current_variable if current_variable else "unknown"
+                img_path = image_path if image_path else ""
+                if "(" in img_path:
+                    line = f"image {img_name} = {img_path}"
+                elif img_path:
+                    line = f'image {img_name} = "{_escape_rpy(img_path)}"'
+                else:
+                    line = f"image {img_name}"
+                defines.append({
+                    "type": "image",
+                    "name": img_name,
+                    "line": line,
+                    "source": source_label,
+                })
+
+    return defines
+
+
+# Ren'Py 框架自带的系统文件，不应纳入定义管理
+_RENPY_SYSTEM_FILES = {
+    "screens.rpy", "gui.rpy", "options.rpy", "script_version.rpy",
+    "navigation.rpy",
+}
+
+
+def scan_rpy_for_defines(rpy_path):
+    """从 .rpy 文件中提取所有顶层 define/default/image 定义。
+    排除 defines.rpy 自身和 Ren'Py 系统文件。
+
+    返回: [{type, name, line, source}, ...]
+    """
+    path_obj = Path(rpy_path)
+    if path_obj.name.lower() == "defines.rpy":
+        return []
+    if path_obj.name.lower() in _RENPY_SYSTEM_FILES:
+        return []
+
+    try:
+        content = path_obj.read_text(encoding="utf-8-sig")
+    except Exception:
+        return []
+
+    defines = []
+    source_label = f"rpy:{path_obj.name}"
+
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#") or not stripped:
+            continue
+
+        m = re.match(r'define\s+(\w+)\s*=\s*Character\b', stripped)
+        if m:
+            defines.append({
+                "type": "character",
+                "name": m.group(1),
+                "line": stripped,
+                "source": source_label,
+            })
+            continue
+
+        m = re.match(r'default\s+(\w+)\s*=\s*(.+)', stripped)
+        if m:
+            defines.append({
+                "type": "variable",
+                "name": m.group(1),
+                "line": stripped,
+                "source": source_label,
+            })
+            continue
+
+        m = re.match(r'image\s+(.+?)\s*=\s*(.+)', stripped)
+        if m:
+            defines.append({
+                "type": "image",
+                "name": m.group(1).strip(),
+                "line": stripped,
+                "source": source_label,
+            })
+
+    return defines
+
+
+def parse_existing_defines(defines_path):
+    """解析现有的 defines.rpy，返回 {name: line} 映射。"""
+    if not os.path.isfile(defines_path):
+        return {}
+
+    try:
+        content = Path(defines_path).read_text(encoding="utf-8-sig")
+    except Exception:
+        return {}
+
+    existing = {}
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#") or stripped.startswith("=") or not stripped:
+            continue
+
+        m = re.match(r'define\s+(\w+)\s*=\s*(.+)', stripped)
+        if m:
+            existing[m.group(1)] = stripped
+            continue
+
+        m = re.match(r'default\s+(\w+)\s*=\s*(.+)', stripped)
+        if m:
+            existing[m.group(1)] = stripped
+            continue
+
+        m = re.match(r'image\s+(.+?)\s*=\s*(.+)', stripped)
+        if m:
+            existing[m.group(1).strip()] = stripped
+
+    return existing
+
+
+def _match_def_to_character(def_name, def_type, characters):
+    """将定义匹配到角色名。返回角色名或 None（系统/全局）。
+    匹配策略：在定义名中用下划线和空格分割后，查找与角色名相同的片段。
+    最长匹配优先；角色本身的 define 直接匹配自身。
+    """
+    if def_type == "character":
+        return def_name
+
+    def_parts = re.split(r'[\s_]+', def_name.lower())
+    best = None
+    best_len = 0
+
+    for char in characters:
+        char_lower = char.lower()
+        for part in def_parts:
+            if part == char_lower and len(char) > best_len:
+                best = char
+                best_len = len(char)
+
+    return best
+
+
+# 虚拟角色前缀：变量/图片名前缀 → 分组键 + 显示名
+_VIRTUAL_CHAR_PREFIXES = [
+    (["player_", "pc_", "mc_", "主角_", "主角"], "_player", "玩家"),
+    (["bg_", "bg ", "background_", "background "], "_bg", "背景"),
+]
+
+
+def _match_def_to_virtual(def_name):
+    """匹配虚拟角色前缀（玩家、背景等）。返回 (group_key, display_name) 或 None。
+    支持前缀（player_name → player）和后缀（score_player → player）两种命名风格。
+    """
+    name_lower = def_name.lower()
+    tokens = name_lower.replace(" ", "_").split("_")
+    for prefixes, key, label in _VIRTUAL_CHAR_PREFIXES:
+        for prefix in prefixes:
+            if name_lower.startswith(prefix.lower()):
+                return (key, label)
+            clean = prefix.lower().rstrip("_ ")
+            if clean and clean in tokens:
+                return (key, label)
+    return None
+
+
+# 分类前缀：名称首词命中这些前缀时，优先归入对应虚拟分组（不参与角色匹配）
+_CATEGORY_FIRST_TOKENS = {
+    "bg": ("_bg", "背景"),
+}
+
+
+def _group_defines_by_character(defines):
+    """将定义按角色分组整理。
+
+    返回: [(group_key, display_name, [def, ...]), ...]
+      group_key 为角色名或 "_system"
+    """
+    # 收集所有角色名
+    characters = set()
+    char_def_map = {}
+    for d in defines:
+        if d["type"] == "character":
+            characters.add(d["name"])
+            char_def_map[d["name"]] = d
+
+    groups = {}        # {group_key: [def, ...]}
+    virtual_groups = {}  # {(group_key, display_name): [def, ...]}
+    ungrouped = []
+
+    for d in defines:
+        if d["type"] == "character":
+            groups.setdefault(d["name"], []).append(d)
+            continue
+
+        # 分类前缀优先：首词命中 bg 等分类标记，直接归入对应虚拟组
+        first_token = d["name"].lower().replace(" ", "_").split("_")[0]
+        cat = _CATEGORY_FIRST_TOKENS.get(first_token)
+        if cat:
+            vkey, vlabel = cat
+            virtual_groups.setdefault((vkey, vlabel), []).append(d)
+            continue
+
+        char = _match_def_to_character(d["name"], d["type"], characters)
+        if char:
+            groups.setdefault(char, []).append(d)
+        else:
+            virtual = _match_def_to_virtual(d["name"])
+            if virtual:
+                vkey, vlabel = virtual
+                virtual_groups.setdefault((vkey, vlabel), []).append(d)
+            else:
+                ungrouped.append(d)
+
+    result = []
+    for char_name in sorted(groups.keys(), key=lambda n: n.lower()):
+        # 构造显示名：角色中文名（英文名）
+        char_display = char_name
+        char_def = char_def_map.get(char_name)
+        if char_def:
+            m = re.search(r'Character\("([^"]*)"\)', char_def["line"])
+            if m and m.group(1) != char_name:
+                char_display = f"{m.group(1)}（{char_name}）"
+        result.append((char_name, char_display, groups[char_name]))
+
+    # 虚拟分组（如玩家）排在角色之后、系统之前
+    for (vkey, vlabel) in sorted(virtual_groups.keys(), key=lambda k: k[1]):
+        result.append((vkey, vlabel, virtual_groups[(vkey, vlabel)]))
+
+    if ungrouped:
+        result.append(("_system", "系统/全局定义", ungrouped))
+
+    return result
+
+
+def _format_defines_output(grouped_defines):
+    """格式化分组的定义为 .rpy 文件内容。"""
+    lines = ["# 由 excel_to_rpy.py 定义管理器自动生成", ""]
+
+    for group_key, display_name, defs in grouped_defines:
+        lines.append("")
+        lines.append("=" * 40)
+        lines.append(display_name)
+        lines.append("=" * 40)
+        lines.append("")
+
+        # 排序：角色定义 → 变量（按名排序）→ 图片（按名排序）
+        char_items = [d for d in defs if d["type"] == "character"]
+        var_items = sorted(
+            [d for d in defs if d["type"] == "variable"], key=lambda x: x["name"].lower()
+        )
+        img_items = sorted(
+            [d for d in defs if d["type"] == "image"], key=lambda x: x["name"].lower()
+        )
+
+        for d in char_items + var_items + img_items:
+            lines.append(d["line"])
+        lines.append("")
+
+    return "\n".join(lines) + "\n"
+
+
+def append_defines_from_excel(excel_path):
+    """从 Excel 提取定义，追加到 defines.rpy（不覆盖已有定义）。"""
+    defines_rpy = _find_defines_rpy()
+    if not defines_rpy:
+        return  # 静默跳过
+
+    new_defines = scan_excel_for_defines(excel_path)
+    if not new_defines:
+        return
+
+    existing = parse_existing_defines(str(defines_rpy))
+
+    to_add = [d for d in new_defines if d["name"] not in existing]
+    if not to_add:
+        print(f"[INFO] 定义管理：{len(new_defines)} 个定义全部已存在在 defines.rpy")
+        return
+
+    defines_rpy.parent.mkdir(parents=True, exist_ok=True)
+    if not defines_rpy.exists():
+        defines_rpy.write_text(
+            "# 由 excel_to_rpy.py 定义管理器自动生成\n\n", encoding="utf-8"
+        )
+
+    with open(str(defines_rpy), "a", encoding="utf-8") as f:
+        f.write("\n")
+        for d in to_add:
+            f.write(d["line"] + "\n")
+
+    print(f"[INFO] 定义管理：追加了 {len(to_add)} 个新定义到 {defines_rpy.name}")
+    skipped = len(new_defines) - len(to_add)
+    if skipped:
+        print(f"       {skipped} 个定义已存在，跳过。")
+
+
+def _clean_excel_defines(excel_path, dry_run=False):
+    """删除 Excel 中所有 define_character/define_variable/define_image 行。"""
+    try:
+        wb = load_workbook(excel_path)
+    except Exception:
+        return 0
+
+    removed = 0
+    for sheet in wb.worksheets:
+        if sheet.sheet_state == "hidden" or sheet.title.startswith("_dd"):
+            continue
+        rows_to_delete = []
+        for row in sheet.iter_rows(min_row=2):
+            if len(row) <= COL_CMD:
+                continue
+            raw_cmd = str(row[COL_CMD].value or "").strip()
+            cmd = _parse_cmd(raw_cmd)
+            if cmd in OLD_CMD_ALIASES:
+                cmd = OLD_CMD_ALIASES[cmd]
+            if cmd in ("define_character", "define_variable", "define_image"):
+                rows_to_delete.append(row[0].row)
+
+        for row_num in reversed(rows_to_delete):
+            if not dry_run:
+                sheet.delete_rows(row_num)
+            removed += 1
+
+    if removed and not dry_run:
+        _safe_save_workbook(wb, excel_path, "Excel（清理后）")
+    return removed
+
+
+def _clean_rpy_defines(rpy_path, dry_run=False):
+    """删除 .rpy 中的顶层 define/default/image 行。排除 defines.rpy 自身和 Ren'Py 系统文件。"""
+    path_obj = Path(rpy_path)
+    if path_obj.name.lower() == "defines.rpy":
+        return 0
+    if path_obj.name.lower() in _RENPY_SYSTEM_FILES:
+        return 0
+
+    try:
+        content = path_obj.read_text(encoding="utf-8-sig")
+    except Exception:
+        return 0
+
+    lines = content.splitlines()
+    new_lines = []
+    removed = 0
+
+    for line in lines:
+        stripped = line.strip()
+        if (re.match(r'^\s*define\s+\w+\s*=\s*Character\b', stripped)
+                or re.match(r'^\s*default\s+\w+\s*=', stripped)
+                or re.match(r'^\s*image\s+\S', stripped)):
+            removed += 1
+            continue
+        new_lines.append(line)
+
+    if removed and not dry_run:
+        result = "\n".join(new_lines) + "\n"
+        _safe_write_text(rpy_path, result)
+    return removed
+
+
+def rebuild_all_defines(backup=False, cleanup=False, dry_run=False):
+    """全量扫描项目中的 Excel 和 .rpy 文件，重建 defines.rpy。
+
+    参数:
+        backup: 是否备份旧 defines.rpy（默认 False）
+        cleanup: 是否清理源文件中的定义行（默认 False）
+        dry_run: 是否仅预览（默认 False）
+    """
+    defines_rpy = _find_defines_rpy()
+    if not defines_rpy:
+        game_dir = _find_game_dir()
+        if game_dir:
+            defines_rpy = game_dir / "defines.rpy"
+        else:
+            print("[ERROR] 未找到 game/ 目录，无法确定 defines.rpy 位置。")
+            return
+
+    root = _find_project_root()
+    game_dir = _find_game_dir()
+
+    print(f"\n[INFO] 项目根目录: {root}")
+    print(f"[INFO] game 目录: {game_dir}")
+
+    all_defines = []
+
+    # 扫描 Excel 文件
+    excel_files = []
+    for ext in ("*.xlsx", "*.xlsm"):
+        excel_files.extend(root.glob(ext))
+        excel_files.extend(root.glob(f"**/{ext}"))
+    excel_files = list(set(excel_files))
+
+    print(f"\n[INFO] 扫描 {len(excel_files)} 个 Excel 文件...")
+    for xlsx in excel_files:
+        defs = scan_excel_for_defines(str(xlsx))
+        if defs:
+            print(f"  {xlsx.name}: {len(defs)} 个定义")
+            all_defines.extend(defs)
+
+    # 扫描 .rpy 文件（排除 defines.rpy）
+    rpy_files = []
+    if game_dir and game_dir.is_dir():
+        rpy_files = list(game_dir.glob("**/*.rpy"))
+        rpy_files = [f for f in rpy_files if f.name.lower() != "defines.rpy"]
+
+    print(f"\n[INFO] 扫描 {len(rpy_files)} 个 .rpy 文件...")
+    for rpy in rpy_files:
+        defs = scan_rpy_for_defines(str(rpy))
+        if defs:
+            print(f"  {rpy.name}: {len(defs)} 个定义")
+            all_defines.extend(defs)
+
+    if not all_defines:
+        print("[INFO] 未找到任何定义。")
+        return
+
+    # 去重：Excel 优先于 .rpy；同一来源内取第一个
+    seen = {}
+    conflicts = []
+    for d in all_defines:
+        if d["name"] in seen:
+            existing = seen[d["name"]]
+            if d["source"].startswith("excel:") and not existing["source"].startswith("excel:"):
+                # Excel 覆盖 .rpy
+                conflicts.append((d["name"], existing["source"], d["source"]))
+                seen[d["name"]] = d
+            elif existing["source"].startswith("excel:") and not d["source"].startswith("excel:"):
+                # .rpy 被 Excel 覆盖，记录冲突
+                conflicts.append((d["name"], d["source"], existing["source"]))
+            else:
+                conflicts.append((d["name"], existing["source"], d["source"]))
+        else:
+            seen[d["name"]] = d
+
+    if conflicts:
+        print(f"\n[INFO] 定义冲突（以 Excel 版本为准，{len(conflicts)} 个）:")
+        for name, loser, winner in conflicts[:30]:
+            print(f"  {name}: {loser} → {winner}")
+        if len(conflicts) > 30:
+            print(f"  ... 还有 {len(conflicts) - 30} 个冲突")
+
+    defines_list = list(seen.values())
+    grouped = _group_defines_by_character(defines_list)
+    output = _format_defines_output(grouped)
+
+    if dry_run:
+        print(f"\n{'=' * 40}")
+        print(f"  DRY-RUN 预览 — 将写入 {len(defines_list)} 个定义（{len(grouped)} 组）")
+        print(f"{'=' * 40}")
+        print(output)
+        return
+
+    # 备份
+    if backup and defines_rpy.exists():
+        import shutil as _shutil
+        backup_path = defines_rpy.with_suffix(".rpy.bak")
+        _shutil.copy2(str(defines_rpy), str(backup_path))
+        print(f"[INFO] 已备份到: {backup_path}")
+
+    # 写入
+    defines_rpy.parent.mkdir(parents=True, exist_ok=True)
+    defines_rpy.write_text(output, encoding="utf-8")
+    print(f"\n[OK] defines.rpy 已重建: {len(defines_list)} 个定义, {len(grouped)} 组")
+
+    # 清理源文件
+    if cleanup:
+        if dry_run:
+            print("\n[DRY-RUN] 将清理源文件中的定义行...")
+        else:
+            print("\n[INFO] 清理源文件中的定义行...")
+
+        excel_removed = 0
+        for xlsx in excel_files:
+            n = _clean_excel_defines(str(xlsx), dry_run)
+            if n:
+                excel_removed += n
+                tag = "[DRY-RUN]" if dry_run else ""
+                print(f"  {tag} {xlsx.name}: 删除 {n} 行")
+
+        rpy_removed = 0
+        for rpy_file in rpy_files:
+            n = _clean_rpy_defines(str(rpy_file), dry_run)
+            if n:
+                rpy_removed += n
+                tag = "[DRY-RUN]" if dry_run else ""
+                print(f"  {tag} {rpy_file.name}: 删除 {n} 行")
+
+        print(f"\n  合计: Excel {excel_removed} 行 + .rpy {rpy_removed} 行")
+
+
+# ── 定义管理交互菜单 ──────────────────────────────────────
+
+def _interactive_define_append():
+    """交互式追加定义"""
+    print("\n" + "-" * 40)
+    print("  追加新定义")
+    print("-" * 40)
+    path = input("请输入 Excel 文件路径（可直接拖拽文件到此处）：\n> ").strip()
+    path = _strip_quotes(path)
+    if not path:
+        print("[ERROR] 未输入路径。")
+        return
+    if not os.path.isfile(path):
+        print(f"[ERROR] 文件不存在：{path}")
+        return
+    if not path.lower().endswith((".xlsx", ".xlsm")):
+        print(f"[ERROR] 不是 .xlsx 文件。")
+        return
+
+    defines_rpy = _find_defines_rpy()
+    if not defines_rpy:
+        game_dir = _find_game_dir()
+        if game_dir:
+            defines_rpy = game_dir / "defines.rpy"
+        else:
+            print("[ERROR] 未找到 game/ 目录，无法确定 defines.rpy 位置。")
+            return
+
+    new_defines = scan_excel_for_defines(path)
+    if not new_defines:
+        print("[INFO] 未找到任何定义。")
+        return
+
+    existing = parse_existing_defines(str(defines_rpy))
+    to_add = [d for d in new_defines if d["name"] not in existing]
+
+    print(f"\n发现 {len(new_defines)} 个定义，其中 {len(to_add)} 个是新定义：")
+    for d in to_add:
+        print(f"  + {d['line']}")
+    skipped = len(new_defines) - len(to_add)
+    if skipped:
+        print(f"\n{skipped} 个定义已存在，将跳过。")
+
+    if not to_add:
+        return
+
+    confirm = input(f"\n确认追加 {len(to_add)} 个定义到 defines.rpy？(Y/n)：").strip().lower()
+    if confirm and confirm != "y":
+        print("已取消。")
+        return
+
+    defines_rpy.parent.mkdir(parents=True, exist_ok=True)
+    if not defines_rpy.exists():
+        defines_rpy.write_text(
+            "# 由 excel_to_rpy.py 定义管理器自动生成\n\n", encoding="utf-8"
+        )
+
+    with open(str(defines_rpy), "a", encoding="utf-8") as f:
+        f.write("\n")
+        for d in to_add:
+            f.write(d["line"] + "\n")
+
+    print(f"[OK] 已追加 {len(to_add)} 个定义到 {defines_rpy.name}")
+
+
+def _interactive_define_rebuild():
+    """交互式重建定义"""
+    print("\n" + "-" * 40)
+    print("  重建全部定义")
+    print("-" * 40)
+
+    backup = input("是否备份旧 defines.rpy？(y/N)：").strip().lower() == "y"
+    cleanup = input("是否清理源文件中的定义行？(y/N)：").strip().lower() == "y"
+    dry_run = input("是否预览变更（dry-run）？(y/N)：").strip().lower() == "y"
+
+    if not dry_run:
+        msg = "确认执行重建"
+        if backup:
+            msg += "（将备份）"
+        if cleanup:
+            msg += "（将清理源文件）"
+        confirm = input(f"\n{msg}？(Y/n)：").strip().lower()
+        if confirm and confirm != "y":
+            print("已取消。")
+            return
+
+    rebuild_all_defines(backup=backup, cleanup=cleanup, dry_run=dry_run)
+
+
+def _interactive_define_manager():
+    """定义管理子菜单"""
+    while True:
+        print()
+        print("-" * 40)
+        print("  定义管理（Define Manager）")
+        print("-" * 40)
+        print("  1. 追加新定义（从指定 Excel 提取新定义，追加到 defines.rpy）")
+        print("  2. 重建全部定义（全量扫描所有源文件，重新生成 defines.rpy）")
+        print("  3. 返回主菜单")
+        print("-" * 40)
+        choice = input("请选择 (1/2/3)：").strip()
+        if choice == "1":
+            _interactive_define_append()
+            _pause()
+        elif choice == "2":
+            _interactive_define_rebuild()
+            _pause()
+        elif choice == "3":
+            break
+        else:
+            print("[ERROR] 无效选择。")
+
 
 # ── 入口 ───────────────────────────────────────────────────
 
@@ -1633,9 +2333,10 @@ def interactive_mode():
         print("  2. 校验 Excel 表格（不转换）")
         print("  3. 生成 Excel 模板（含示例和教学）")
         print("  4. 生成空白 Excel 模板（仅表头）")
-        print("  5. 退出")
+        print("  5. 定义管理（Define Manager）")
+        print("  6. 退出")
         print("-" * 40)
-        choice = input("请选择 (1/2/3/4/5)：").strip()
+        choice = input("请选择 (1/2/3/4/5/6)：").strip()
         if choice == "1":
             _interactive_convert()
             _pause()
@@ -1649,10 +2350,12 @@ def interactive_mode():
             _interactive_blank()
             _pause()
         elif choice == "5":
+            _interactive_define_manager()
+        elif choice == "6":
             print("再见！")
             break
         else:
-            print("[ERROR] 无效选择，请输入 1、2、3、4 或 5。")
+            print("[ERROR] 无效选择，请输入 1、2、3、4、5 或 6。")
 
 
 def _fix_working_directory():
@@ -1676,7 +2379,19 @@ def main():
         parser.add_argument("--blank", action="store_true", help="生成空白 Excel 模板（无示例数据）")
         parser.add_argument("--template-path", default="renpy_script_template.xlsx", help="模板保存路径")
         parser.add_argument("--check", action="store_true", help="仅校验表格，不转换")
+        parser.add_argument("--rebuild-defines", action="store_true", help="全量扫描源文件，重建 defines.rpy")
+        parser.add_argument("--backup", action="store_true", help="重建 defines.rpy 前备份（配合 --rebuild-defines）")
+        parser.add_argument("--no-cleanup", action="store_true", help="重建时不清理源文件中的定义行（配合 --rebuild-defines）")
+        parser.add_argument("--dry-run", action="store_true", help="仅预览重建结果，不写入（配合 --rebuild-defines）")
         args = parser.parse_args()
+
+        if args.rebuild_defines:
+            rebuild_all_defines(
+                backup=args.backup,
+                cleanup=not args.no_cleanup,
+                dry_run=args.dry_run,
+            )
+            return
 
         if args.template:
             generate_template(args.template_path)
@@ -1694,7 +2409,7 @@ def main():
 
         input_path = _strip_quotes(args.input)
         if not os.path.isfile(input_path):
-            print(f"❌ 文件不存在：{input_path}")
+            print(f"\u274c 文件不存在：{input_path}")
             input("\n按 Enter 键退出...")
             sys.exit(1)
 
@@ -1722,7 +2437,7 @@ def main():
     except KeyboardInterrupt:
         print("\n\n再见！")
     except Exception as e:
-        print(f"\n❌ 发生错误：{e}")
+        print(f"\n\u274c 发生错误：{e}")
         input("\n按 Enter 键退出...")
 
 

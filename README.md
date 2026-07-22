@@ -38,7 +38,7 @@ pip install openpyxl
 
 | 脚本 | 做什么 |
 |------|--------|
-| `excel_to_rpy.py` | 1. 转换 / 2. 校验 / 3. 教学模板（含示例）/ 4. 空白模板 |
+| `excel_to_rpy.py` | 1. 转换 / 2. 校验 / 3. 模板 / 4. 空白模板 / 5. 定义管理 / 6. 退出 |
 | `rpy_to_excel.py` | 1. 转换 .rpy 为 Excel |
 | `test_roundtrip.py` | 1. 测试自带样本 / 2. 测试游戏脚本 / 3. 测试其他 |
 
@@ -59,6 +59,18 @@ python excel_to_rpy.py script.xlsx -o output.rpy
 
 # 仅校验不转换
 python excel_to_rpy.py script.xlsx --check
+
+# 定义管理 — 重建 defines.rpy（全量扫描源文件）
+python excel_to_rpy.py --rebuild-defines
+
+# 重建前备份旧文件
+python excel_to_rpy.py --rebuild-defines --backup
+
+# 重建但不清理源文件中的定义行
+python excel_to_rpy.py --rebuild-defines --no-cleanup
+
+# 仅预览重建结果，不实际写入
+python excel_to_rpy.py --rebuild-defines --dry-run
 
 # .rpy -> Excel
 python rpy_to_excel.py script.rpy -o output.xlsx
@@ -226,6 +238,81 @@ G 列填增量时支持显式正负号：`+1` → `$ var += 1`，`-3` → `$ var
 - 复合条件 `if a > 1 and b < 5:` 反向解析为**多行结构化条件**，自动填入 F 列逻辑连接符
 - 转场和位置名称自动**英译中**（`dissolve`→`溶解`、`left`→`左边`）
 - 反向生成的 Excel 同样自动填充角色、变量、图片下拉列表
+
+## 定义管理（Define Manager）
+
+Excel 是策划的主数据源，`game/defines.rpy` 是由工具自动维护的定义汇总镜像。`.rpy` 文件（除 `defines.rpy` 外）只保留剧情逻辑。
+
+### 自动追加
+
+每次执行 `excel_to_rpy.py script.xlsx` 转换时，工具会自动从 Excel 提取 `define_character` / `define_variable` / `define_image` 定义，追加到 `game/defines.rpy`。已存在的同名定义自动跳过，不会覆盖。
+
+### 交互菜单
+
+主菜单选 **5. 定义管理** → 子菜单：
+
+- **1. 追加新定义**：指定 Excel，提取其中的新定义追加到 `defines.rpy`
+- **2. 重建全部定义**：扫描项目所有 Excel 和 `.rpy`（排除 `defines.rpy`），全量重建 `defines.rpy`
+
+### 重建选项
+
+选择重建时会依次询问：
+
+| 选项 | 默认 | 说明 |
+|------|------|------|
+| 是否备份旧 defines.rpy？ | **N** | 备份为 `defines.rpy.bak` |
+| 是否清理源文件中的定义行？ | **Y** | 删除 Excel 和 `.rpy` 中的定义行 |
+| 是否预览变更（dry-run）？ | **N** | 仅打印输出，不写入、不清理 |
+
+### 定义整理规则
+
+写入 `defines.rpy` 时，定义按**角色归属**分组：
+
+```
+========================================
+庄桂清（zhuang）
+========================================
+
+define zhuang = Character("庄桂清")
+default love_zhuang = 0
+default trust_zhuang = 0
+image zhuang happy = "zhuang_happy.png"
+
+========================================
+玩家
+========================================
+
+default player_name = ""
+default score_player = 0
+default pc_health = 100
+
+========================================
+背景
+========================================
+
+image bg classroom = "bg_classroom.jpg"
+image bg room_zhuang = "bg_room_zhuang.jpg"
+
+========================================
+系统/全局定义
+========================================
+
+default has_key = False
+default money = 100
+```
+
+**分组优先级**：
+1. **分类前缀**（最高）：首词为 `bg` 的定义强制归入"背景"组，不参与角色匹配
+2. **角色匹配**：定义名中含已定义角色名（如 `love_zhuang` → 庄桂清）
+3. **虚拟前缀**：`player_` / `pc_` / `mc_` / `主角` 前缀 → "玩家"组（前后缀均支持，如 `score_player`）
+4. **系统/全局**：其余无法归类的定义
+
+> Ren'Py 框架文件（`screens.rpy`、`gui.rpy`、`options.rpy`）中的 `default` 定义会被自动排除，不会吸入 `defines.rpy`。
+
+### 去重规则
+
+- **追加模式**：同名定义已存在则跳过
+- **重建模式**：同名定义以 **Excel 版本为准**（`defines.rpy` 被完全覆盖）；输出冲突报告供人工核查
 
 ## 注意事项
 
