@@ -54,7 +54,8 @@ HEADERS = [
     ("指令类型", 20),
     ("图片/背景", 24),
     ("角色名", 14),
-    ("变量名", 14),      # 新增
+    ("变量名", 14),
+    ("逻辑连接", 10),   # 新增
     ("对话文本", 40),
     ("选项文本", 20),
     ("跳转目标", 16),
@@ -62,6 +63,8 @@ HEADERS = [
     ("位置/特效/属性", 22),
     ("备注", 20),
 ]
+
+LOGIC_CONNECTORS = ["and", "or"]
 
 COMMAND_TYPES = [
     "label（场景标签）",
@@ -213,6 +216,49 @@ def _try_match_structured_dollar(content: str) -> dict | None:
     return None
 
 
+def _try_parse_compound_condition(content: str) -> list | None:
+    """
+    尝试匹配复合结构化条件：if score >= 10 and score < 20:
+    返回多个 result dict 的列表（每个子条件一行），或 None。
+    """
+    m = re.match(r'(if|elif)\s+(.+?)\s*:\s*$', content)
+    if not m:
+        return None
+    keyword = m.group(1)
+    body = m.group(2).strip()
+
+    tokens = re.split(r'\s+(and|or)\s+', body)
+    if len(tokens) <= 1:
+        return None
+
+    results = []
+    for i in range(0, len(tokens), 2):
+        cond_str = tokens[i].strip()
+        connector = tokens[i + 1] if i + 1 < len(tokens) else ""
+
+        m2 = re.match(r'(\w+)\s*(==|!=|>=|<=|>|<)\s*(\S+)', cond_str)
+        if not m2:
+            return None
+
+        var_name = m2.group(1)
+        op = m2.group(2)
+        val = m2.group(3)
+        cmd = STRUCTURED_COND_MAP.get(op)
+        if not cmd:
+            return None
+
+        label = STRUCTURED_COND_LABEL.get(cmd, f"{cmd}（变量{op}）")
+        result_type = keyword if i == 0 else f"{keyword}_continue"
+        results.append({
+            "_type": result_type,
+            "指令类型": label,
+            "变量名": var_name,
+            "逻辑连接": connector,
+            "对话文本": val,
+        })
+    return results
+
+
 HEADER_FILL = PatternFill(start_color="2F5496", end_color="2F5496", fill_type="solid")
 HEADER_FONT = Font(name="微软雅黑", bold=True, color="FFFFFF", size=10)
 HEADER_ALIGN = Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -275,8 +321,11 @@ def parse_rpy(filepath: str) -> list:
             else:
                 # 识别 python 块内的 if/elif/else
                 struct = _try_match_structured_condition(content)
+                compound = _try_parse_compound_condition(content)
                 if struct:
                     result.append(struct)
+                elif compound:
+                    result.extend(compound)
                 elif content == "else:":
                     result.append({"_type": "else", "指令类型": "else（否则）"})
                 elif re.match(r"elif\s+", content) and content.rstrip().endswith(":"):
@@ -388,6 +437,14 @@ def parse_rpy(filepath: str) -> list:
             struct_cond = _try_match_structured_condition(content)
             if struct_cond:
                 result.append(struct_cond)
+                in_if_body = True
+                if_base_indent = indent
+                continue
+
+            # 复合结构化条件（if var1 op val1 and var2 op val2:）
+            compound_conds = _try_parse_compound_condition(content)
+            if compound_conds:
+                result.extend(compound_conds)
                 in_if_body = True
                 if_base_indent = indent
                 continue
@@ -709,7 +766,8 @@ def _write_sheet(wb, sheet_name: str, items: list):
             item.get("指令类型", ""),
             item.get("图片/背景", ""),
             item.get("角色名", ""),
-            item.get("变量名", ""),       # 新增列
+            item.get("变量名", ""),
+            item.get("逻辑连接", ""),       # 新增列
             item.get("对话文本", ""),
             item.get("选项文本", ""),
             item.get("跳转目标", ""),
@@ -751,9 +809,14 @@ def _setup_sheet_header(ws):
     dv.add("B2:B10000")
     ws.add_data_validation(dv)
 
-    # 变量开关下拉（F 列）
+    # 逻辑连接下拉（F 列）
+    dv_connect = DataValidation(type="list", formula1='"and,or"', allow_blank=True)
+    dv_connect.add("F2:F10000")
+    ws.add_data_validation(dv_connect)
+
+    # 变量开关下拉（G 列）
     dv_toggle = DataValidation(type="list", formula1='"true,false"', allow_blank=True)
-    dv_toggle.add("F2:F10000")
+    dv_toggle.add("G2:G10000")
     ws.add_data_validation(dv_toggle)
 
 

@@ -133,6 +133,17 @@ label structured_variable_test:
     if health <= 45:
         "生命值小于等于 45。"
 
+    "———— 复合条件测试 ————"
+
+    if score >= 10 and score < 50:
+        "分数在 10~49 之间。"
+
+    if score == 100 or health <= 0:
+        "满分或没血了。"
+
+    if score >= 11 and score <= 50 and love != 0:
+        "三连复合条件。"
+
     if money >= 100 and love >= 5:
         "复杂条件仍用传统 if。"
         return

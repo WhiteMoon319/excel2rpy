@@ -29,13 +29,14 @@ COL_SCENE_LABEL = 0
 COL_CMD = 1
 COL_IMAGE = 2
 COL_CHARACTER = 3
-COL_VARIABLE = 4     # 新增：变量名
-COL_DIALOGUE = 5     # 对话文本（原 4 → 5）
-COL_OPTION = 6       # 选项文本（原 5 → 6）
-COL_JUMP = 7         # 跳转目标（原 6 → 7）
-COL_AUDIO = 8        # 音频路径（原 7 → 8）
-COL_EFFECT = 9       # 位置/特效/属性（原 8 → 9）
-COL_NOTES = 10       # 备注（原 9 → 10）
+COL_VARIABLE = 4     # 变量名
+COL_CONNECT = 5      # 逻辑连接（新增，第6列）
+COL_DIALOGUE = 6     # 对话文本
+COL_OPTION = 7       # 选项文本
+COL_JUMP = 8         # 跳转目标
+COL_AUDIO = 9        # 音频路径
+COL_EFFECT = 10      # 位置/特效/属性
+COL_NOTES = 11       # 备注
 
 # ── 模板配置 ──────────────────────────────────────────────
 
@@ -44,7 +45,8 @@ HEADERS = [
     ("指令类型", 20),
     ("图片/背景", 24),
     ("角色名", 14),
-    ("变量名", 14),      # 新增
+    ("变量名", 14),
+    ("逻辑连接", 10),   # 新增：and / or / 空
     ("对话文本", 40),
     ("选项文本", 20),
     ("跳转目标", 16),
@@ -52,6 +54,9 @@ HEADERS = [
     ("位置/特效/属性", 22),
     ("备注", 20),
 ]
+
+# 逻辑连接下拉选项
+LOGIC_CONNECTORS = ["and", "or"]
 
 # 结构化变量条件运算符映射
 VARIABLE_OP_MAP = {
@@ -261,20 +266,26 @@ def _setup_sheet_header_and_dropdowns(
     if scanned_variables:
         _add_dropdown_validation(ws, "E", scanned_variables)
 
+    # 逻辑连接下拉（列 F → COL_CONNECT+1=6）
+    connect_formula = '"and,or"'
+    dv_connect = DataValidation(type="list", formula1=connect_formula, allow_blank=True)
+    dv_connect.error = "请选择 and 或 or"
+    dv_connect.errorTitle = "无效值"
+    dv_connect.add("F2:F10000")
+    ws.add_data_validation(dv_connect)
+
     # 图片下拉（列 C → COL_IMAGE+1=3）：image 定义名 + 文件路径
     all_image_refs = set(scanned_images)
     all_image_refs.update(scanned_files)
     if all_image_refs:
         _add_dropdown_validation(ws, "C", all_image_refs)
 
-    # 变量开关值下拉（列 F 当指令类型为 variable_toggle 时使用）
-    # 由于 openpyxl 不支持条件下拉，这里使用 DataValidation 的 allow_blank
-    # 在 "变量开关" 行填对话文本列，用户手动选 true/false
+    # 变量开关值下拉（列 G 当指令类型为 variable_toggle 时使用）
     toggle_formula = '"true,false"'
     dv_toggle = DataValidation(type="list", formula1=toggle_formula, allow_blank=True)
     dv_toggle.error = "请选择 true 或 false"
     dv_toggle.errorTitle = "无效值"
-    dv_toggle.add("F2:F10000")
+    dv_toggle.add("G2:G10000")
     ws.add_data_validation(dv_toggle)
 
     ws.freeze_panes = "A2"
@@ -282,10 +293,22 @@ def _setup_sheet_header_and_dropdowns(
 
 # ── 模板生成 ──────────────────────────────────────────────
 
+def _pad_row_for_connect(row):
+    """在位置 COL_CONNECT(5) 插入空字符串（逻辑连接列），旧11列→新12列。
+    已为12列的跳过不处理。"""
+    r = list(row)
+    if len(r) >= len(HEADERS):
+        return r
+    while len(r) < COL_CONNECT:
+        r.append("")
+    r.insert(COL_CONNECT, "")
+    return r
+
+
 def _get_template_data(scanned_characters, scanned_variables, scanned_images, scanned_files):
-    """返回模板数据（所有 Sheet 的行数据），供 generate_template 和 generate_blank_template 共用"""
-    # 每个Sheet的数据结构：[(sheet_name, rows)], rows = [[col0..col10], ...]
-    # 注：需要返回列表，因为 _add_sheet 内部会修改数据
+    """返回模板数据（所有 Sheet 的行数据），供 generate_template 和 generate_blank_template 共用
+    注：每行仍为 11 列（旧格式），_add_sheet 会自动插入逻辑连接列。
+    """
 
     # ── Sheet 1: 入门演示 ──
     sheet_basic = [
@@ -405,13 +428,21 @@ def _get_template_data(scanned_characters, scanned_variables, scanned_images, sc
         ["", "player_input（玩家输入）", "", "player_name", "", "请输入你的名字：", "", "", "无名", "", ""],
         ["", "dialogue（角色对话）", "", "主角", "", "你好，[player_name]！", "", "", "", "", ""],
         ["", "", "", "", "", "", "", "", "", "", ""],
-        ["", "narrator（旁白）", "", "", "", "结构化条件判断：", "", "", "", "", ""],
-        ["", "variable_ge（变量≥）", "", "", "score", "50", "", "", "", "", "如果 score ≥ 50"],
-        ["", "dialogue（角色对话）", "", "主角", "", "及格了！", "", "", "", "", ""],
-        ["", "variable_lt（变量<）", "", "", "score", "30", "", "", "", "", "否则如果 score < 30"],
-        ["", "dialogue（角色对话）", "", "主角", "", "还差很多……", "", "", "", "", ""],
-        ["", "else（否则）", "", "", "", "", "", "", "", "", "否则"],
-        ["", "dialogue（角色对话）", "", "主角", "", "还需要加把劲。", "", "", "", "", ""],
+        ["", "narrator（旁白）", "", "", "", "", "结构化条件判断：", "", "", "", "", ""],
+        ["", "", "", "", "", "", "", "", "", "", "", ""],
+        ["", "narrator（旁白）", "", "", "", "", "【复合条件】score ≥ 10 and score < 50：", "", "", "", "", ""],
+        ["", "variable_ge（变量≥）", "", "", "score", "and", "10", "", "", "", "", "第1行：逻辑连接填 and"],
+        ["", "variable_lt（变量<）", "", "", "score", "", "50", "", "", "", "", "第2行：逻辑连接为空，结束条件"],
+        ["", "dialogue（角色对话）", "", "主角", "", "", "分数在 10~49 之间！", "", "", "", "", ""],
+        ["", "", "", "", "", "", "", "", "", "", "", ""],
+        ["", "narrator（旁白）", "", "", "", "", "【复合条件】score == 100 or health <= 0：", "", "", "", "", ""],
+        ["", "variable_eq（变量=）", "", "", "score", "or", "100", "", "", "", "", "第1行：or 连接"],
+        ["", "variable_le（变量≤）", "", "", "health", "", "0", "", "", "", "", "第2行：结束"],
+        ["", "dialogue（角色对话）", "", "主角", "", "", "满分或没血了！", "", "", "", "", ""],
+        ["", "", "", "", "", "", "", "", "", "", "", ""],
+        ["", "narrator（旁白）", "", "", "", "", "【单条件】score ≥ 50（逻辑连接留空=独立条件）：", "", "", "", "", ""],
+        ["", "variable_ge（变量≥）", "", "", "score", "", "50", "", "", "", "", ""],
+        ["", "dialogue（角色对话）", "", "主角", "", "", "及格了！", "", "", "", "", ""],
         ["", "", "", "", "", "", "", "", "", "", ""],
         ["", "call（调用子场景）", "", "", "", "", "", "audio_demo", "", "", ""],
         ["", "return（返回）", "", "", "", "", "", "", "", "", ""],
@@ -470,6 +501,7 @@ def generate_template(output_path: str):
         )
         # 数据
         for row_idx, row_data in enumerate(data_rows, start=2):
+            row_data = _pad_row_for_connect(row_data)
             for col_idx, value in enumerate(row_data, start=1):
                 cell = ws.cell(row=row_idx, column=col_idx, value=value)
                 cell.font = CELL_FONT
@@ -947,6 +979,9 @@ def check_excel(input_path: str) -> list:
                     issues.append((excel_row, "warn", f"{cmd} 缺少变量名"))
                 if not dialogue:
                     issues.append((excel_row, "warn", f"{cmd} 缺少比较值"))
+                lg = _val(row, COL_CONNECT).strip().lower()
+                if lg and lg not in ("and", "or"):
+                    issues.append((excel_row, "warn", f"逻辑连接值无效：'{lg}'，应使用 and / or / 空"))
 
             # menu 检测
             if cmd == "menu":
@@ -1058,6 +1093,9 @@ def convert_excel_to_rpy(input_path: str, output_path: str):
         current_variable = ""
         current_characters = []
         scene_sheet_label = ""
+        # 复合条件链状态
+        pending_chain_parts = []   # 累积的条件片段
+        prev_connector = ""        # 上一行的逻辑连接符
 
         def _indent():
             return base_indent + ("    " if in_if_body else "")
@@ -1070,9 +1108,15 @@ def convert_excel_to_rpy(input_path: str, output_path: str):
             row = [str(c).strip() if c is not None else "" for c in raw_row]
 
             if all(c == "" for c in row):
+                _end_if_body()
                 if in_menu:
                     in_menu = False
-                _end_if_body()
+                # 空行 → 结束未完成的复合条件链
+                if pending_chain_parts:
+                    lines.append(f"{base_indent}{' '.join(pending_chain_parts)}:")
+                    pending_chain_parts = []
+                    prev_connector = ""
+                    in_if_body = True
                 continue
 
             scene_label = _val(row, COL_SCENE_LABEL)
@@ -1081,6 +1125,7 @@ def convert_excel_to_rpy(input_path: str, output_path: str):
             image_path = _val(row, COL_IMAGE)
             character = _val(row, COL_CHARACTER)
             variable = _val(row, COL_VARIABLE)
+            logic_connect = _val(row, COL_CONNECT).strip().lower()
             dialogue = _val(row, COL_DIALOGUE)
             option_text = _val(row, COL_OPTION)
             jump_target = _val(row, COL_JUMP)
@@ -1289,15 +1334,40 @@ def convert_excel_to_rpy(input_path: str, output_path: str):
                     lines.append(f"{_indent()}$ {name} = {val_bool}")
                 continue
 
-            # ── 结构化条件判断 ──
+            # ── 结构化条件判断（支持复合条件链）──
             if cmd in VARIABLE_OP_MAP:
-                _end_if_body()
                 name = var_name if var_name else ""
                 val = dialogue if dialogue else "0"
                 op = VARIABLE_OP_MAP[cmd]
-                lines.append(f"{_indent()}if {name} {op} {val}:")
-                in_if_body = True
+
+                if logic_connect:
+                    # 复合条件的一部分
+                    if not pending_chain_parts:
+                        _end_if_body()
+                        pending_chain_parts.append(f"if {name} {op} {val}")
+                    else:
+                        pending_chain_parts.append(f"{prev_connector} {name} {op} {val}")
+                    prev_connector = logic_connect
+                else:
+                    # 逻辑连接为空
+                    if pending_chain_parts:
+                        pending_chain_parts.append(f"{prev_connector} {name} {op} {val}")
+                        lines.append(f"{base_indent}{' '.join(pending_chain_parts)}:")
+                        pending_chain_parts = []
+                        prev_connector = ""
+                        in_if_body = True
+                    else:
+                        _end_if_body()
+                        lines.append(f"{_indent()}if {name} {op} {val}:")
+                        in_if_body = True
                 continue
+
+            # 其他指令出现 → 结束未完成的复合条件链
+            if pending_chain_parts:
+                lines.append(f"{base_indent}{' '.join(pending_chain_parts)}:")
+                pending_chain_parts = []
+                prev_connector = ""
+                in_if_body = True
 
             # ── $（通用设置变量）──
             if cmd == "$":
