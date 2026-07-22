@@ -22,7 +22,7 @@ except ImportError:
 try:
     from excel_to_rpy import scan_existing_scripts, _add_dropdown_validation
 except ImportError:
-    scan_existing_scripts = lambda d="game": (set(), set(), set(), [])
+    scan_existing_scripts = lambda d=None: (set(), set(), set(), [])
     _add_dropdown_validation = lambda *a, **k: None
 
 # ── 英→中 反向映射 ──────────────────────────────────────

@@ -142,9 +142,21 @@ ALT_FILL = PatternFill(start_color="D6E4F0", end_color="D6E4F0", fill_type="soli
 
 # ── 扫描已有脚本 ──────────────────────────────────────────
 
-def scan_existing_scripts(game_dir: str = "game"):
+def _find_project_root() -> Path:
+    """从脚本所在目录向上查找包含 game/ 目录的项目根目录"""
+    script_dir = Path(__file__).resolve().parent
+    for p in [script_dir] + list(script_dir.parents):
+        if (p / "game").is_dir():
+            return p
+    return Path.cwd()
+
+
+def scan_existing_scripts(game_dir: str = None):
     """
     扫描 game/ 目录下的 .rpy 文件和图片文件，提取已有定义。
+
+    会自动从脚本目录向上查找项目根目录（含 game/ 的目录）。
+    也可通过 game_dir 参数手动指定。
 
     返回: (characters, variables, image_defs, image_files)
         - characters: set, define 定义的角色名
@@ -156,7 +168,15 @@ def scan_existing_scripts(game_dir: str = "game"):
     variables = set()
     image_defs = {}  # 定义名 → 文件路径
 
-    game_path = Path(game_dir)
+    if game_dir is None:
+        root = _find_project_root()
+        game_path = root / "game"
+    else:
+        game_path = Path(game_dir)
+        if not game_path.is_dir():
+            root = _find_project_root()
+            game_path = root / "game"
+
     if not game_path.is_dir():
         return characters, variables, set(), []
 

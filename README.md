@@ -6,10 +6,24 @@
 
 ## 文件
 
+脚本可放在任意子目录（如 `scripts/`），会自动向上查找项目根目录（含 `game/` 的目录）。
+
 ```
-excel_to_rpy.py    Excel -> .rpy （正向转换）
-rpy_to_excel.py    .rpy -> Excel （反向转换）
-test_roundtrip.py  回归测试（改代码后跑一下）
+excel_to_rpy.py      Excel -> .rpy （正向转换）
+rpy_to_excel.py      .rpy -> Excel （反向转换）
+test_roundtrip.py    回归测试（改代码后跑一下）
+```
+
+### 推荐目录结构
+
+```
+project_root/
+├── game/               ← Ren'Py 脚本和资源
+├── scripts/            ← 本工具脚本（可选，放哪都行）
+│   ├── excel_to_rpy.py
+│   ├── rpy_to_excel.py
+│   └── test_roundtrip.py
+└── excel/              ← 表格文件（建议）
 ```
 
 ## 安装
@@ -37,7 +51,10 @@ python excel_to_rpy.py --template
 # 生成空白模板（仅表头+下拉）
 python excel_to_rpy.py --blank
 
-# Excel -> .rpy（自动先校验）
+# 自定义模板路径（对 --template 和 --blank 都适用）
+python excel_to_rpy.py --template --template-path my_template.xlsx
+
+# Excel -> .rpy（自动先校验，有错误也会继续转换）
 python excel_to_rpy.py script.xlsx -o output.rpy
 
 # 仅校验不转换
@@ -45,6 +62,9 @@ python excel_to_rpy.py script.xlsx --check
 
 # .rpy -> Excel
 python rpy_to_excel.py script.rpy -o output.xlsx
+
+# .rpy -> Excel（不拆分 Sheet，全部放到一个表）
+python rpy_to_excel.py script.rpy -o output.xlsx --no-split
 
 # 回归测试
 python test_roundtrip.py test.rpy
@@ -130,7 +150,7 @@ python test_roundtrip.py test.rpy
 | F 逻辑连接 | 固定 `and` / `or` 下拉（用于复合条件串联） |
 | G 对话文本 | 当指令=变量开关时，固定 `true` / `false` 下拉 |
 
-> 每次生成模板时自动扫描当前 `game/` 目录，生成对应的下拉列表。
+> 每次生成模板时，工具会从脚本所在目录向上查找含 `game/` 的项目根目录，自动扫描并生成对应的下拉列表。
 
 ## 特色功能
 
@@ -164,6 +184,33 @@ python test_roundtrip.py test.rpy
 
 无需手动写 `define character`——脚本自动扫描全表，收集所有出现的角色名，在输出的 `.rpy` 顶部生成 `define` 语句。
 
+- 显式 `define_character` 行：D 列填变量名，G 列可填完整 `Character("显示名", ...)`；G 列为空则自动生成 `Character("变量名")`
+- `show` 指令中的角色名（非 bg 开头）也会自动注册
+- 自动注册的角色默认 `define 角色名 = Character("角色名")`，需要中文显示名请用显式定义
+
+### 旁白扩展
+
+L 列（备注）可用于控制旁白格式：
+
+| 备注值 | 效果 |
+|--------|------|
+| `centered` | 生成 `centered "文本"`（居中显示） |
+| `explicit` | 生成 `narrator "文本"`（显式 narrator） |
+| 留空 | 生成普通 `"文本"` |
+
+### 玩家输入
+
+`player_input` 指令的 K 列（位置/特效）可填写**默认值**，生成 `$ var = renpy.input("提示").strip() or "默认值"`。
+
+### 保存容错
+
+当保存目标目录被安全软件（如 Windows Defender 的勒索软件防护）阻止时，脚本会自动尝试备选路径：
+目标目录 → 桌面 → 文档 → 系统临时目录。Excel 生成重试 3 次后才走备选链。
+
+### 变量增减
+
+G 列填增量时支持显式正负号：`+1` → `$ var += 1`，`-3` → `$ var -= 3`；不带符号的正数也视为 `+=`。
+
 ### 多 Sheet 支持
 
 每个 Sheet 视为一个独立场景。首个 Sheet 定义为 `start`，其他 Sheet 以标签名或 Sheet 名为入口。
@@ -176,10 +223,15 @@ python test_roundtrip.py test.rpy
 
 反向转换自动识别结构化指令（`variable_set`、`variable_change`、`variable_toggle`、`variable_eq` 等），保证双向转换不失真。
 
+- 复合条件 `if a > 1 and b < 5:` 反向解析为**多行结构化条件**，自动填入 F 列逻辑连接符
+- 转场和位置名称自动**英译中**（`dissolve`→`溶解`、`left`→`左边`）
+- 反向生成的 Excel 同样自动填充角色、变量、图片下拉列表
+
 ## 注意事项
 
-- 图片路径可用双引号包裹（`"images/bg.jpg"`），函数调用（`Transform(...)`）直接写
+- 图片路径可用双引号包裹（`"images/bg.jpg"`），函数调用（`Transform(...)`）直接写，脚本自动识别括号区分
 - 空行用于分隔场景、结束 `if` / `menu` 块
 - `python:` 多行代码块会拆分为独立语句和 `if` 块，功能等价
+- 运行时脚本会自动向上查找含 `game/` 的项目根目录，无需指定路径
 - 双击运行时若 CWD 异常（如 `C:\Windows\System32`），脚本自动切换到自身目录
 - 结构化条件 `变量=`、`变量≥` 等只在条件为简单 `if var OP val` 时有效；复杂条件请用传统 `if`
