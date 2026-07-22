@@ -196,12 +196,16 @@ def scan_existing_scripts(game_dir: str = "game"):
     defined_paths.update(image_defs.keys())
 
     gui_dirs = {"gui", "GUI"}
+    prefix = game_dir + "/"
     for ext in image_extensions:
         for img_file in game_path.glob(f"**/*{ext}"):
             rel = str(img_file).replace("\\", "/")
             parts = Path(rel).parts
             if any(p in gui_dirs for p in parts):
                 continue
+            # 去掉 game/ 前缀，与 image 定义中的路径格式一致
+            if rel.startswith(prefix):
+                rel = rel[len(prefix):]
             if rel not in defined_paths:
                 image_files.append(rel)
 
