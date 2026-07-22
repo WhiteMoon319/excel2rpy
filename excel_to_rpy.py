@@ -195,10 +195,13 @@ def scan_existing_scripts(game_dir: str = "game"):
     defined_paths = set(image_defs.values())
     defined_paths.update(image_defs.keys())
 
+    gui_dirs = {"gui", "GUI"}
     for ext in image_extensions:
         for img_file in game_path.glob(f"**/*{ext}"):
             rel = str(img_file).replace("\\", "/")
-            # 有 image 定义的只用定义名，不用文件路径
+            parts = Path(rel).parts
+            if any(p in gui_dirs for p in parts):
+                continue
             if rel not in defined_paths:
                 image_files.append(rel)
 
@@ -212,9 +215,11 @@ def _add_dropdown_validation(ws, col_letter, items, row_range="2:10000"):
     sorted_items = sorted(str(i) for i in items)
     # 大约估算：逗号分隔 + 引号
     combined = '"' + ",".join(sorted_items) + '"'
+    start_row, end_row = row_range.split(":")
+    cell_range = f"{col_letter}{start_row}:{col_letter}{end_row}"
     if len(combined) <= 255:
         dv = DataValidation(type="list", formula1=combined, allow_blank=True)
-        dv.add(f"{col_letter}{row_range}")
+        dv.add(cell_range)
         ws.add_data_validation(dv)
     else:
         wb = ws.parent
@@ -230,7 +235,7 @@ def _add_dropdown_validation(ws, col_letter, items, row_range="2:10000"):
             formula1=f"={helper_name}!$A$1:$A${len(sorted_items)}",
             allow_blank=True,
         )
-        dv.add(f"{col_letter}{row_range}")
+        dv.add(cell_range)
         ws.add_data_validation(dv)
 
 
