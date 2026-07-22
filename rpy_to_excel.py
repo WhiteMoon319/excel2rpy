@@ -18,6 +18,13 @@ except ImportError:
     print("请先安装 openpyxl：pip install openpyxl")
     sys.exit(1)
 
+# 复用主脚本的工具函数
+try:
+    from excel_to_rpy import scan_existing_scripts, _add_dropdown_validation
+except ImportError:
+    scan_existing_scripts = lambda d="game": (set(), set(), set(), [])
+    _add_dropdown_validation = lambda *a, **k: None
+
 # ── 英→中 反向映射 ──────────────────────────────────────
 
 TRANSITION_REVERSE = {
@@ -739,8 +746,8 @@ def parse_rpy(filepath: str) -> list:
     return result
 
 
-def _write_sheet(wb, sheet_name: str, items: list):
-    """将 items 写入一个 Sheet（11 列）"""
+def _write_sheet(wb, sheet_name: str, items: list, dropdowns=None):
+    """将 items 写入一个 Sheet（12 列）"""
     if sheet_name in [s.title for s in wb.worksheets]:
         ws = wb[sheet_name]
     elif wb.worksheets and wb.worksheets[0].title == "Sheet":
@@ -749,7 +756,7 @@ def _write_sheet(wb, sheet_name: str, items: list):
     else:
         ws = wb.create_sheet(sheet_name)
 
-    _setup_sheet_header(ws)
+    _setup_sheet_header(ws, dropdowns)
 
     row_num = 1
     for item in items:
@@ -788,7 +795,7 @@ def _write_sheet(wb, sheet_name: str, items: list):
     ws.freeze_panes = "A2"
 
 
-def _setup_sheet_header(ws):
+def _setup_sheet_header(ws, dropdowns=None):
     """设置 Sheet 表头（仅当表头不存在时），并添加下拉验证"""
     if ws.cell(1, 1).value:
         return
@@ -819,13 +826,48 @@ def _setup_sheet_header(ws):
     dv_toggle.add("G2:G10000")
     ws.add_data_validation(dv_toggle)
 
+    if dropdowns:
+        if dropdowns.get("characters"):
+            _add_dropdown_validation(ws, "D", dropdowns["characters"])
+        if dropdowns.get("variables"):
+            _add_dropdown_validation(ws, "E", dropdowns["variables"])
+        if dropdowns.get("images"):
+            _add_dropdown_validation(ws, "C", dropdowns["images"])
+
 
 def write_excel(rows: list, output_path: str, split_sheets: bool = True):
     """将解析结果写入 Excel，默认按 label 拆分为多 Sheet"""
     wb = Workbook()
 
+    # 从解析结果中收集角色、变量、图片引用
+    dd_characters = set()
+    dd_variables = set()
+    dd_images = set()
+    for item in rows:
+        if item.get("角色名"):
+            dd_characters.add(item["角色名"])
+        if item.get("变量名"):
+            dd_variables.add(item["变量名"])
+        if item.get("图片/背景"):
+            v = item["图片/背景"]
+            if not v.startswith('"') and not v.startswith("'"):
+                dd_images.add(v)
+
+    # 合并 game/ 目录扫描结果
+    sc_chars, sc_vars, sc_imgs, sc_files = scan_existing_scripts()
+    dd_characters.update(sc_chars)
+    dd_variables.update(sc_vars)
+    dd_images.update(sc_imgs)
+    dd_images.update(sc_files)
+
+    dropdowns = {
+        "characters": dd_characters,
+        "variables": dd_variables,
+        "images": dd_images,
+    }
+
     if not split_sheets:
-        _write_sheet(wb, "script", rows)
+        _write_sheet(wb, "script", rows, dropdowns)
     else:
         top_items = []
         label_groups = []
@@ -855,11 +897,11 @@ def write_excel(rows: list, output_path: str, split_sheets: bool = True):
         if top_items or label_groups:
             first_name = label_groups[0][0] if label_groups else "script"
             first_items = top_items + (label_groups[0][1] if label_groups else [])
-            _write_sheet(wb, first_name, first_items)
+            _write_sheet(wb, first_name, first_items, dropdowns)
             sheet_count += 1
 
         for label_name, items in label_groups[1:]:
-            _write_sheet(wb, label_name, items)
+            _write_sheet(wb, label_name, items, dropdowns)
             sheet_count += 1
 
     wb.save(output_path)
