@@ -1243,7 +1243,7 @@ def convert_excel_to_rpy(input_path: str, output_path: str, manage_defines: bool
             # ── scene ──
             if cmd == "scene":
                 img = _escape_rpy(image_path) if image_path else ""
-                fx = f" {effect}" if effect else ""
+                fx = f" with {_translate_effect(effect)}" if effect else ""
                 if img:
                     lines.append(f"{_indent()}scene {img}{fx}")
                 elif effect:
@@ -1254,7 +1254,21 @@ def convert_excel_to_rpy(input_path: str, output_path: str, manage_defines: bool
             if cmd == "show":
                 char = character if character else ""
                 img = _escape_rpy(image_path) if image_path else ""
-                fx = f" {effect}" if effect else ""
+                raw_fx = _translate_effect(effect) if effect else ""
+                pos_parts = []
+                trans_parts = []
+                for p in raw_fx.split():
+                    if p in POSITION_MAP.values():
+                        pos_parts.append(p)
+                    elif p in TRANSITION_MAP.values():
+                        trans_parts.append(p)
+                    else:
+                        trans_parts.append(p)  # unknown → assume transition
+                fx = ""
+                if pos_parts:
+                    fx += f" at {' '.join(pos_parts)}"
+                if trans_parts:
+                    fx += f" with {' '.join(trans_parts)}"
                 if char and img:
                     lines.append(f"{_indent()}show {char} {img}{fx}")
                 elif char:
@@ -1266,7 +1280,9 @@ def convert_excel_to_rpy(input_path: str, output_path: str, manage_defines: bool
             # ── hide ──
             if cmd == "hide":
                 char = character if character else ""
-                fx = f" {effect}" if effect else ""
+                raw_fx = _translate_effect(effect) if effect else ""
+                trans_parts = [p for p in raw_fx.split() if p in TRANSITION_MAP.values() or p not in POSITION_MAP.values()]
+                fx = f" with {' '.join(trans_parts)}" if trans_parts else ""
                 if char:
                     lines.append(f"{_indent()}hide {char}{fx}")
                 continue

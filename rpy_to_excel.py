@@ -510,7 +510,7 @@ def parse_rpy(filepath: str) -> list:
                 m = re.match(r"(.+?)\s+with\s+(.+)", rest)
                 if m:
                     img = m.group(1).strip()
-                    effect = "with " + m.group(2).strip()
+                    effect = m.group(2).strip()
                 else:
                     img = rest
                 result.append({
@@ -536,7 +536,13 @@ def parse_rpy(filepath: str) -> list:
                 img = " ".join(img_parts)
 
                 remaining = parts[i:]
-                effect = " ".join(remaining) if remaining else ""
+                effect_parts = []
+                skip_next = False
+                for p in remaining:
+                    if p in ("as", "at", "with"):
+                        continue
+                    effect_parts.append(p)
+                effect = " ".join(effect_parts)
 
                 result.append({
                     "_type": "show",
@@ -553,7 +559,7 @@ def parse_rpy(filepath: str) -> list:
                 m = re.match(r"(\S+)\s+(.+)", rest)
                 if m:
                     rest = m.group(1)
-                    effect = m.group(2)
+                    effect = re.sub(r"\bwith\s+", "", m.group(2)).strip()
                 result.append({
                     "_type": "hide",
                     "指令类型": "hide（隐藏角色）",
