@@ -1613,9 +1613,18 @@ def _append_new_defines(new_defines):
     defines_rpy.parent.mkdir(parents=True, exist_ok=True)
     original = defines_rpy.read_text(encoding="utf-8-sig") if defines_rpy.exists() else ""
     separator = "" if not original or original.endswith("\n") else "\n"
-    block = ["", "# 由 excel_to_rpy.py 追加"] if original else ["# 由 excel_to_rpy.py 定义管理器生成"]
-    block.extend(d["line"] for d in to_add)
-    output = original + separator + "\n".join(block) + "\n"
+
+    grouped = _group_defines_by_character(to_add)
+    header = "# 由 excel_to_rpy.py 定义管理器生成" if not original else "# 由 excel_to_rpy.py 追加"
+    new_block = [] if not original else [""]
+    new_block.append(header)
+    for _group_key, display_name, defs in grouped:
+        new_block.append(f"# {display_name}")
+        chars = [d for d in defs if d["type"] == "character"]
+        vars_sorted = sorted([d for d in defs if d["type"] == "variable"], key=lambda x: x["name"].lower())
+        imgs_sorted = sorted([d for d in defs if d["type"] == "image"], key=lambda x: x["name"].lower())
+        new_block.extend(d["line"] for d in chars + vars_sorted + imgs_sorted)
+    output = original + separator + "\n".join(new_block) + "\n"
     actual_path = Path(_safe_write_text(str(defines_rpy), output)).resolve()
     if actual_path != defines_rpy.resolve():
         raise OSError(f"无法写入 {defines_rpy}，备用文件位于 {actual_path}")
