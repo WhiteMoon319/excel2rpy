@@ -810,13 +810,8 @@ def _setup_sheet_header(ws, dropdowns=None):
         ws.column_dimensions[get_column_letter(col_idx)].width = width
     ws.row_dimensions[1].height = 24
 
-    # 指令类型下拉
-    cmd_formula = '"' + ",".join(COMMAND_TYPES) + '"'
-    dv = DataValidation(type="list", formula1=cmd_formula, allow_blank=True)
-    dv.error = "请从下拉列表选择指令类型"
-    dv.errorTitle = "无效指令"
-    dv.add("B2:B10000")
-    ws.add_data_validation(dv)
+    # 指令类型下拉（列表较长时自动使用隐藏辅助 Sheet）
+    _add_dropdown_validation(ws, "B", COMMAND_TYPES)
 
     # 逻辑连接下拉（F 列）
     dv_connect = DataValidation(type="list", formula1='"and,or"', allow_blank=True)
@@ -908,7 +903,8 @@ def write_excel(rows: list, output_path: str, split_sheets: bool = True):
 
     wb.save(output_path)
     print(f"Excel saved: {output_path}")
-    print(f"   {sum(1 for r in rows if r.get('_type') != 'blank')} rows / {len(wb.worksheets)} sheet(s)")
+    visible_sheets = sum(1 for ws in wb.worksheets if ws.sheet_state == "visible")
+    print(f"   {sum(1 for r in rows if r.get('_type') != 'blank')} rows / {visible_sheets} sheet(s)")
 
 
 def _strip_quotes(s: str) -> str:

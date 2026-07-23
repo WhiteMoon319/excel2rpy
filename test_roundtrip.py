@@ -14,7 +14,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 
 from rpy_to_excel import parse_rpy, write_excel
-from excel_to_rpy import convert_excel_to_rpy, _fix_working_directory
+from excel_to_rpy import convert_excel_to_rpy, _find_game_dir, _fix_working_directory
 
 
 def normalize(text: str) -> list:
@@ -32,13 +32,19 @@ def normalize(text: str) -> list:
 
 
 def run_roundtrip(rpy_path: str) -> str:
-    tmp_dir = Path(tempfile.mkdtemp())
-    xlsx_path = tmp_dir / "test.xlsx"
-    rpy_out = tmp_dir / "test.rpy"
-    rows = parse_rpy(rpy_path)
-    write_excel(rows, str(xlsx_path))
-    convert_excel_to_rpy(str(xlsx_path), str(rpy_out))
-    return rpy_out.read_text(encoding="utf-8")
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        xlsx_path = tmp_dir / "test.xlsx"
+        rpy_out = tmp_dir / "test.rpy"
+        rows = parse_rpy(rpy_path)
+        write_excel(rows, str(xlsx_path))
+        convert_excel_to_rpy(str(xlsx_path), str(rpy_out), manage_defines=False)
+        return rpy_out.read_text(encoding="utf-8")
+
+
+def _game_script_path() -> str:
+    game_dir = _find_game_dir()
+    return str(game_dir / "script.rpy") if game_dir else ""
 
 
 def test_file(rpy_path: str) -> bool:
@@ -119,7 +125,7 @@ def interactive_mode():
             test_file(os.path.join(SCRIPT_DIR, "test_roundtrip.rpy"))
             input("\n按 Enter 键继续...")
         elif choice == "2":
-            game = r"D:\program\TheCampusHeaven\game\script.rpy"
+            game = _game_script_path()
             if os.path.isfile(game):
                 test_file(game)
             else:
@@ -129,7 +135,7 @@ def interactive_mode():
             passed = 0
             total = 0
             for p in [os.path.join(SCRIPT_DIR, "test_roundtrip.rpy"),
-                       r"D:\program\TheCampusHeaven\game\script.rpy"]:
+                      _game_script_path()]:
                 if os.path.isfile(p):
                     total += 1
                     if test_file(p):
