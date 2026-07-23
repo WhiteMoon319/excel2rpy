@@ -2184,10 +2184,10 @@ def rebuild_all_defines(backup=False, cleanup=False, dry_run=False):
 
 def _interactive_define_append():
     """交互式追加定义"""
-    print("\n" + "-" * 40)
-    print("  追加新定义")
-    print("-" * 40)
-    path = input("请输入 Excel 文件路径（可直接拖拽文件到此处）：\n> ").strip()
+    print("\n" + "=" * 50)
+    print("  追加新定义（从 Excel 提取并追加到 defines.rpy）")
+    print("=" * 50)
+    path = input("\n  Excel 路径（可拖拽文件）：\n  > ").strip()
     path = _strip_quotes(path)
     if not path:
         print("[ERROR] 未输入路径。")
@@ -2210,50 +2210,89 @@ def _interactive_define_append():
 
     new_defines = scan_excel_for_defines(path)
     if not new_defines:
-        print("[INFO] 未找到任何定义。")
+        print("[INFO] 该 Excel 中没有定义行（define_character / define_variable / define_image）。")
         return
 
     existing = parse_existing_defines(str(defines_rpy))
     to_add = [d for d in new_defines if d["name"] not in existing]
+    skipped_count = len(new_defines) - len(to_add)
 
-    print(f"\n发现 {len(new_defines)} 个定义，其中 {len(to_add)} 个是新定义：")
-    for d in to_add:
-        print(f"  + {d['line']}")
-    skipped = len(new_defines) - len(to_add)
-    if skipped:
-        print(f"\n{skipped} 个定义已存在，将跳过。")
+    print(f"\n  Excel: {os.path.basename(path)}")
+    print(f"  目标:  {defines_rpy}")
+    print(f"\n  ── 扫描结果 ──")
+    print(f"  共发现 {len(new_defines)} 个定义")
 
     if not to_add:
+        print(f"  (全部 {skipped_count} 个定义已存在于 defines.rpy，无需追加)")
         return
 
-    confirm = input(f"\n确认追加 {len(to_add)} 个定义到 defines.rpy？(Y/n)：").strip().lower()
+    print(f"  其中 {len(to_add)} 个为新定义，{skipped_count} 个已存在" if skipped_count else
+          f"  (全部为新定义)")
+
+    # 分组预览
+    grouped = _group_defines_by_character(to_add)
+    for _group_key, display_name, defs in grouped:
+        print(f"\n  ▸ {display_name}")
+        for d in defs:
+            print(f"    + {d['line']}")
+
+    if skipped_count:
+        print(f"\n  (另有 {skipped_count} 个同名定义已存在，将跳过)")
+
+    print()
+    confirm = input("  确认追加以上定义？(Y/n)：").strip().lower()
     if confirm and confirm != "y":
-        print("已取消。")
+        print("  已取消。")
         return
 
     _append_new_defines(to_add)
-    print(f"[OK] 已追加 {len(to_add)} 个定义到 {defines_rpy.name}")
+    print(f"\n  [OK] 已追加 {len(to_add)} 个定义到 {defines_rpy.name}\n")
 
 
 def _interactive_define_rebuild():
     """交互式重建定义"""
-    print("\n" + "-" * 40)
-    print("  重建全部定义")
-    print("-" * 40)
+    print("\n" + "=" * 50)
+    print("  重建全部定义（扫描所有源文件，重新生成 defines.rpy）")
+    print("=" * 50)
 
-    backup = input("是否备份旧 defines.rpy？(y/N)：").strip().lower() == "y"
-    cleanup = input("是否清理源文件中的定义行？(y/N)：").strip().lower() == "y"
-    dry_run = input("是否预览变更（dry-run）？(y/N)：").strip().lower() == "y"
+    defines_rpy = _find_defines_rpy()
+    if not defines_rpy:
+        game_dir = _find_game_dir()
+        if not game_dir:
+            print("[ERROR] 未找到 game/ 目录。")
+            return
+        defines_rpy = game_dir / "defines.rpy"
 
-    if not dry_run:
-        msg = "确认执行重建"
-        if backup:
-            msg += "（将备份）"
-        if cleanup:
-            msg += "（将清理源文件）"
-        confirm = input(f"\n{msg}？(Y/n)：").strip().lower()
+    print(f"\n  目标: {defines_rpy}")
+    print("\n  ── 扫描设置 ──")
+    print(f"  1. 备份旧文件:  {'否'}")
+    print(f"  2. 清理源文件:  {'否'}")
+    print(f"  3. 预览（dry-run）:  {'否'}")
+    print(f"  4. 直接执行")
+
+    backup = False
+    cleanup = False
+    dry_run = False
+    while True:
+        choice = input("\n  修改选项 (1/2/3) 或直接回车执行：").strip()
+        if choice == "1":
+            backup = not backup
+            print(f"  备份旧文件 → {('否', '是')[backup]}")
+        elif choice == "2":
+            cleanup = not cleanup
+            print(f"  清理源文件 → {('否', '是')[cleanup]}")
+        elif choice == "3":
+            dry_run = not dry_run
+            print(f"  预览模式   → {('否', '是')[dry_run]}")
+        elif choice == "4" or choice == "":
+            break
+        else:
+            print("  输入 1/2/3 切换选项，或回车/4 执行。")
+
+    if not dry_run and not cleanup:
+        confirm = input("\n  确认重建？(Y/n)：").strip().lower()
         if confirm and confirm != "y":
-            print("已取消。")
+            print("  已取消。")
             return
 
     rebuild_all_defines(backup=backup, cleanup=cleanup, dry_run=dry_run)
@@ -2263,24 +2302,24 @@ def _interactive_define_manager():
     """定义管理子菜单"""
     while True:
         print()
-        print("-" * 40)
-        print("  定义管理（Define Manager）")
-        print("-" * 40)
-        print("  1. 追加新定义（从指定 Excel 提取新定义，追加到 defines.rpy）")
-        print("  2. 重建全部定义（全量扫描所有源文件，重新生成 defines.rpy）")
-        print("  3. 返回主菜单")
-        print("-" * 40)
-        choice = input("请选择 (1/2/3)：").strip()
+        print("=" * 50)
+        print("  定义管理 (Define Manager)")
+        print("=" * 50)
+        print("  1. 追加新定义      — 从 Excel 提取新定义，按角色分组追加到末尾")
+        print("  2. 重建全部定义    — 全量扫描所有源文件，重新生成 defines.rpy")
+        print("  0. 返回主菜单")
+        print("-" * 50)
+        choice = input("  请选择 (0/1/2)：").strip()
         if choice == "1":
             _interactive_define_append()
             _pause()
         elif choice == "2":
             _interactive_define_rebuild()
             _pause()
-        elif choice == "3":
+        elif choice == "0":
             break
         else:
-            print("[ERROR] 无效选择。")
+            print("[ERROR] 无效选择，请输入 0、1 或 2。")
 
 
 # ── 入口 ───────────────────────────────────────────────────
@@ -2297,8 +2336,10 @@ def _pause():
 
 
 def _interactive_convert():
-    print("\n" + "-" * 40)
-    path = input("请输入 Excel 文件路径（可直接拖拽文件到此处）：\n> ").strip()
+    print("\n" + "=" * 50)
+    print("  Excel → .rpy")
+    print("=" * 50)
+    path = input("\n  Excel 路径（可拖拽文件）：\n  > ").strip()
     path = _strip_quotes(path)
     if not path:
         print("[ERROR] 未输入路径，返回主菜单。")
@@ -2308,10 +2349,10 @@ def _interactive_convert():
         return
     if not path.lower().endswith(".xlsx"):
         print(f"[ERROR] 不是 .xlsx 文件，请拖拽 Excel 表格。")
-        print(f"       .rpy 文件请用 rpy_to_excel.py 打开。")
+        print(f"       .rpy 文件请用选项 6 反向转换。")
         return
     default_out = str(Path(path).with_suffix(".rpy"))
-    out = input(f"输出路径（直接回车使用默认：{default_out}）：\n> ").strip()
+    out = input(f"\n  输出路径（回车默认：{default_out}）：\n  > ").strip()
     out = _strip_quotes(out) if out else default_out
     print("\n校验表格...")
     issues = check_excel(path)
@@ -2324,16 +2365,20 @@ def _interactive_convert():
 
 
 def _interactive_template():
-    print("\n" + "-" * 40)
+    print("\n" + "=" * 50)
+    print("  生成模板（含示例）")
+    print("=" * 50)
     default_path = "renpy_script_template.xlsx"
-    path = input(f"模板保存路径（直接回车使用默认：{default_path}）：\n> ").strip()
+    path = input(f"\n  保存路径（回车默认：{default_path}）：\n  > ").strip()
     path = _strip_quotes(path) if path else default_path
     generate_template(path)
 
 
 def _interactive_check():
-    print("\n" + "-" * 40)
-    path = input("请输入 Excel 文件路径（可直接拖拽文件到此处）：\n> ").strip()
+    print("\n" + "=" * 50)
+    print("  校验 Excel 表格")
+    print("=" * 50)
+    path = input("\n  Excel 路径（可拖拽文件）：\n  > ").strip()
     path = _strip_quotes(path)
     if not path:
         print("[ERROR] 未输入路径，返回主菜单。")
@@ -2350,17 +2395,21 @@ def _interactive_check():
 
 def _interactive_blank():
     """交互式生成空白模板"""
-    print("\n" + "-" * 40)
+    print("\n" + "=" * 50)
+    print("  生成空白模板（仅表头）")
+    print("=" * 50)
     default_path = "renpy_script_blank.xlsx"
-    path = input(f"空白模板保存路径（直接回车使用默认：{default_path}）：\n> ").strip()
+    path = input(f"\n  保存路径（回车默认：{default_path}）：\n  > ").strip()
     path = _strip_quotes(path) if path else default_path
     generate_blank_template(path)
 
 
 def _interactive_rpy_to_excel():
     """从主菜单调用反向转换，避免用户必须记住另一个脚本。"""
-    print("\n" + "-" * 40)
-    path = _strip_quotes(input("请输入 .rpy 文件路径（可直接拖拽文件到此处）：\n> ").strip())
+    print("\n" + "=" * 50)
+    print("  .rpy → Excel")
+    print("=" * 50)
+    path = _strip_quotes(input("\n  .rpy 路径（可拖拽文件）：\n  > ").strip())
     if not path:
         print("[ERROR] 未输入路径。")
         return
@@ -2368,11 +2417,12 @@ def _interactive_rpy_to_excel():
         print("[ERROR] 文件不存在或不是 .rpy 文件。")
         return
     default_out = str(Path(path).with_suffix(".xlsx"))
-    out = _strip_quotes(input(f"输出路径（直接回车使用默认：{default_out}）：\n> " ).strip()) or default_out
-    split = input("按 label 拆分为多 Sheet？(Y/n)：").strip().lower() != "n"
+    out = _strip_quotes(input(f"\n  输出路径（回车默认：{default_out}）：\n  > " ).strip()) or default_out
+    split = input("  按 label 拆分为多 Sheet？(Y/n)：").strip().lower() != "n"
     try:
         from rpy_to_excel import parse_rpy, write_excel
         write_excel(parse_rpy(path), out, split_sheets=split)
+        print(f"\n  [OK] 已输出到 {out}")
     except Exception as e:
         print(f"[ERROR] 转换失败：{e}")
 
@@ -2384,47 +2434,90 @@ def _interactive_roundtrip():
     test_file(path)
 
 
-def interactive_mode():
+def _interactive_convert_menu():
+    """转换工具子菜单"""
     while True:
         print()
-        print("=" * 40)
-        print("  Ren'Py Excel → .rpy 转换工具")
-        print("=" * 40)
-        print("  1. 转换 Excel 为 .rpy")
-        print("  2. 校验 Excel 表格（不转换）")
-        print("  3. 生成 Excel 模板（含示例和教学）")
-        print("  4. 生成空白 Excel 模板（仅表头）")
-        print("  5. 定义管理（Define Manager）")
-        print("  6. .rpy 转 Excel")
-        print("  7. 运行回归测试")
-        print("  8. 退出")
-        print("-" * 40)
-        choice = input("请选择 (1/2/3/4/5/6/7/8)：").strip()
+        print("=" * 50)
+        print("  转换工具")
+        print("=" * 50)
+        print("  1. Excel → .rpy      表格转脚本")
+        print("  2. .rpy → Excel      脚本转表格")
+        print("  3. 校验 Excel 表格   检查错误")
+        print("  0. 返回主菜单")
+        print("-" * 50)
+        choice = input("  请选择：").strip()
         if choice == "1":
             _interactive_convert()
             _pause()
         elif choice == "2":
-            _interactive_check()
-            _pause()
-        elif choice == "3":
-            _interactive_template()
-            _pause()
-        elif choice == "4":
-            _interactive_blank()
-            _pause()
-        elif choice == "5":
-            _interactive_define_manager()
-        elif choice == "6":
             _interactive_rpy_to_excel()
             _pause()
-        elif choice == "7":
+        elif choice == "3":
+            _interactive_check()
+            _pause()
+        elif choice == "0":
+            break
+        else:
+            print("[ERROR] 无效选择。")
+
+
+def _interactive_template_menu():
+    """模板工具子菜单"""
+    while True:
+        print()
+        print("=" * 50)
+        print("  模板工具")
+        print("=" * 50)
+        print("  1. 生成模板（含示例和教学）")
+        print("  2. 生成空白模板（仅表头+下拉）")
+        print("  0. 返回主菜单")
+        print("-" * 50)
+        choice = input("  请选择：").strip()
+        if choice == "1":
+            _interactive_template()
+            _pause()
+        elif choice == "2":
+            _interactive_blank()
+            _pause()
+        elif choice == "0":
+            break
+        else:
+            print("[ERROR] 无效选择。")
+
+
+# ── 接口统一别名（保持旧函数名兼容）──
+_interactive_generate_template = _interactive_template_menu
+_interactive_define_menu = _interactive_define_manager
+
+
+def interactive_mode():
+    while True:
+        print()
+        print("=" * 50)
+        print("  Ren'Py Excel <-> .rpy 双向转换工具")
+        print("=" * 50)
+        print("  1. 转换工具           Excel↔.rpy / 校验")
+        print("  2. 模板工具           生成/空白模板")
+        print("  3. 定义管理           game/defines.rpy")
+        print("  4. 回归测试           roundtrip 验证")
+        print("  0. 退出")
+        print("-" * 50)
+        choice = input("  请选择：").strip()
+        if choice == "1":
+            _interactive_convert_menu()
+        elif choice == "2":
+            _interactive_template_menu()
+        elif choice == "3":
+            _interactive_define_manager()
+        elif choice == "4":
             _interactive_roundtrip()
             _pause()
-        elif choice == "8":
+        elif choice == "0":
             print("再见！")
             break
         else:
-            print("[ERROR] 无效选择，请输入 1 到 8。")
+            print("[ERROR] 无效选择，请输入 0 到 4。")
 
 
 def _fix_working_directory():
